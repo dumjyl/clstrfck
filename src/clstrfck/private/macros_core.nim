@@ -6,7 +6,7 @@ from std/macros import
 export
    NimNodeKind, NimNodeKinds, NimSymKind, kind, len, items, eq_ident,
    `[]`, `[]=`, name, get_ast, new_lit, bind_sym, params, `params=`, tree_repr,
-   body, `body=`, copy, str_val
+   body, `body=`, copy, str_val, new_call
 
 func init*[T](Self: type seq[T], len: Natural = 0): seq[T] = new_seq[T](len)
 
@@ -63,6 +63,14 @@ template expect_min*(n: NimNode, min_len: int, user_note: string = "") =
 template error*(n: NimNode, user_note: string) =
    macros.error(indent("\nReason: " & user_note & '\n' & verbose_note(n), 2), n)
 
+func low*(self: NimNode): int = 0
+
+func high*(self: NimNode): int = self.len - 1
+
+func add*(self: NimNode, sons: varargs[NimNode]) = discard macros.add(self, sons)
+
+func delete*(self: NimNode, i: int, n = 1) = macros.del(self, i, n)
+
 func set_len*(self: NimNode, len: int, fill = NimNode.default) =
    if len > self.len:
       for _ in 0 ..< len - self.len:
@@ -70,16 +78,12 @@ func set_len*(self: NimNode, len: int, fill = NimNode.default) =
    else:
       self.delete(self.high, self.len - len)
 
-func add*(self: NimNode, sons: varargs[NimNode]) = discard macros.add(self, sons)
-
 func init*(kind: NimNodeKind, sons: varargs[NimNode]): NimNode =
    result = macros.new_NimNode(kind)
    for son in sons:
       result.add(son)
 
 func init*(kind: NimSymKind, ident_base: string = ""): NimNode = macros.gen_sym(kind, ident_base)
-
-func delete*(self: NimNode, i: int, n = 1) = macros.del(self, i, n)
 
 func ident*(
       name: string,
@@ -139,18 +143,13 @@ func gen_enum_type*(names: seq[string]): NimNode =
 
 func gen_type_def*(name: NimNode, def: NimNode): NimNode = nnk_type_def.init(name, empty, def)
 
-func is_command(n: NimNode, name: string, valid_argument_range: Slice[int]): bool =
+func is_command*(n: NimNode, name: string, valid_argument_range: Slice[int]): bool =
    result = n of nnk_command and n.len - 1 in valid_argument_range and n[0].eq_ident(name)
 
-func is_infix(n: NimNode, name: string): bool =
+func is_infix*(n: NimNode, name: string): bool =
    result = n of nnk_infix and n.len == 3 and n[0].eq_ident(name)
 
-func is_inject(n: NimNode): bool = n of nnk_acc_quoted and n.len == 1
-
-func is_inject_stmt(n: NimNode): bool =
-   result = n.is_command("inject", 1 .. 2) and n[1] of nnk_ident
-
-macro visit_node(node: untyped, context: untyped, stmts: untyped) =
+macro visit_node*(node: untyped, context: untyped, stmts: untyped) =
    let visit_sym = nsk_proc.init("visit")
    let node_id = "node".ident
    let call = visit_sym.new_call(node)
