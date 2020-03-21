@@ -31,7 +31,7 @@ func tree_dbg(n: NimNode): string = "Tree repr: " & n.tree_repr.enclose
 
 template dump*(n: NimNode) =
    debug_echo("Dump '", ast_to_str(n), "':\n",
-              indent(n.tree_dbg & '\n' & n.stmt_dbg, 2))
+              indent(tree_dbg(n) & '\n' & stmt_dbg(n), 2))
 
 func verbose_note(n: NimNode): string =
    when defined(dump_node):
@@ -59,6 +59,9 @@ template expect*(n: NimNode, kinds: NimNodeKinds, user_note: string = "") =
 
 template expect_min*(n: NimNode, min_len: int, user_note: string = "") =
    {.line.}: impl_expect(n.len >= min_len, user_note, n)
+
+template expect*(n: NimNode, valid_len: Slice[int], user_note: string = "") =
+   {.line.}: impl_expect(n.len in valid_len, user_note, n)
 
 template error*(n: NimNode, user_note: string) =
    macros.error(indent("\nReason: " & user_note & '\n' & verbose_note(n), 2), n)

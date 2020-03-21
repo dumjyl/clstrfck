@@ -4,8 +4,7 @@ import macros_core
 
 template not_of*(a, b): auto = not(a of b)
 
-proc `of`*[T: enum](kind: T, variant: T): bool = kind == variant
-proc `of`*[T: enum](kind: T, variants: set[T]): bool = kind in variants
+const nnk_ident_like = {nnk_ident, nnk_sym, nnk_open_sym_choice, nnk_closed_sym_choice}
 
 type MatchKind = enum IfLike, CaseLike
 
@@ -39,10 +38,8 @@ proc classify(expr: NimNode, branches: NimNode): MatchKind =
    of CaseLike: result = IfLike
 
 proc parse_of_ident(expr: NimNode): NimNode =
-   case expr.kind:
-   of nnk_ident, nnk_sym, nnk_open_sym_choice, nnk_closed_sym_choice: result = expr
-   of nnk_dot_expr: expr.error"TODO"
-   else: result = nil
+   if expr of nnk_ident_like:
+      result = ident(result.str_val)
 
 proc parse_of_variant(expr: NimNode): (NimNode, seq[NimNode]) =
    case expr.kind:
@@ -53,36 +50,52 @@ proc parse_of_variant(expr: NimNode): (NimNode, seq[NimNode]) =
    of nnk_ident: result[0] = expr
    else: expr.error("failed to parse match expression")
 
-proc elif_expr(stmts: NimNode, expr: NimNode, safe: bool) =
-   if expr.is_infix"and":
-      stmts.elif_expr(expr[1], true)
-      stmts.elif_expr(expr[2], true)
+proc is_ident_aliased(ident: NimNode, unpack_args: seq[NimNode]): bool =
+   for arg in unpack_args:
+      if arg.eq_ident"_" or ident != nil and ident.eq_ident(arg):
+         return true
+
+proc process(unpack_args: var seq[NimNode], ident: NimNode) =
+   for i in 0 ..< unpack_args.len:
+      unpack_args[i].expect(nnk_ident_like)
+      if unpack_args[i].eq_ident"_":
+         if ident == nil:
+            unpack_args[i].error("failed to infer variable name")
+         unpack_args[i] = ident
+
+proc visit_elif_expr(expr: NimNode, safe: bool): NimNode =
+   result = expr
+   if expr.is_infix("and"):
+      expr[1] = expr[1].visit_elif_expr(true)
+      expr[2] = expr[2].visit_elif_expr(true)
    elif expr.is_infix"of":
       if not safe:
          expr.error("cannot prove match expression is safe")
-      let ident = expr[1].parse_of_ident
-      var (variant, unpack_args) = expr[2].parse_of_variant
-      expr[2] = variant
-      var ident_aliased = false
-      let fresh_ident = ident(ident.str_val)
-      for i in 0 ..< unpack_args.len:
-         if unpack_args[i].eq_ident"_":
-            if ident == nil:
-               expr.error("failed to infer variable name")
-            unpack_args[i] = fresh_ident
-            ident_aliased = true
-         if unpack_args[i].eq_ident(ident):
-            ident_aliased = true
-      let downcast_ident = if ident_aliased: nsk_var.init(ident.str_val)
-                           else: fresh_ident
+      let ident = parse_of_ident(expr[1])
+      var (variant, unpack_args) = parse_of_variant(expr[2])
+      var ident_aliased = is_ident_aliased(ident, unpack_args)
+      unpack_args.process(ident)
+      var stmts = nnk_stmt_list_expr.init
+      var base_sym = expr[1]
+      if base_sym.not_of(nnk_ident_like):
+         base_sym = nsk_let.init
+         stmts.add_AST:
+            let `base_sym` = `expr[1]`
+      let is_of_sym = nsk_let.init
       stmts.add_AST:
-         var `downcast_ident` = unsafe_expect(`ident`, `variant`)
+         let `is_of_sym` = `base_sym` of `variant`
+      let downcast_ident = if ident_aliased or ident == nil: nsk_var.init else: ident
+      stmts.add_AST:
+         var `downcast_ident` = unsafe_expect(`base_sym`, `variant`)
+      stmts.add()
       let call = "unpack".new_call(downcast_ident)
       call.add(unpack_args)
       stmts.add(call)
+      stmts.add(is_of_sym)
+      result = stmts
    else:
       for i in 0 ..< expr.len:
-         stmts.elif_expr(expr[i], false)
+         expr[i] = expr[i].visit_elif_expr(false)
 
 proc if_match(expr: NimNode, branches: NimNode): NimNode =
    branches[0].expect(nnk_stmt_list)
@@ -90,10 +103,7 @@ proc if_match(expr: NimNode, branches: NimNode): NimNode =
    result = nnk_if_stmt.init()
    for branch in branches:
       if branch.kind == nnk_elif_branch:
-         var stmts = gen_stmts()
-         stmts.elif_expr(branch[0], true)
-         stmts.add(branch[^1])
-         branch[^1] = stmts
+         branch[0] = branch[0].visit_elif_expr(true)
       result.add(branch)
 
 proc case_match(expr: NimNode, branches: NimNode): NimNode =
@@ -101,6 +111,10 @@ proc case_match(expr: NimNode, branches: NimNode): NimNode =
    result = nnk_case_stmt.init(!kind(`expr`))
    for branch in branches:
       result.add(branch)
+
+proc `of`*[T: enum](kind: T, variant: T): bool = kind == variant
+
+proc `of`*[T: enum](kind: T, variants: set[T]): bool = kind in variants
 
 macro match*(self: untyped, branches: varargs[untyped]): untyped =
    ## TODO: add elif support for case like variant.
