@@ -30,6 +30,8 @@ proc classify_expr(expr: NimNode): MatchKind =
    result = res
 
 proc classify(expr: NimNode, branches: NimNode): MatchKind =
+   # match is overloaded as to be both if-like control flow and case-like,
+   # determine which or error.
    let expr_kind = classify_expr(expr)
    let branches_kind = classify_branches(branches)
    if expr_kind == branches_kind: return expr_kind
@@ -41,7 +43,7 @@ proc parse_of_ident(expr: NimNode): NimNode =
    if expr of nnk_ident_like:
       result = ident(result.str_val)
 
-proc parse_of_variant(expr: NimNode): (NimNode, seq[NimNode]) =
+proc parse_of_variant(expr: NimNode): tuple[variants: NimNode, unpack_args: seq[NimNode]] =
    case expr.kind:
    of nnk_call:
       result[0] = expr[0]
@@ -51,11 +53,13 @@ proc parse_of_variant(expr: NimNode): (NimNode, seq[NimNode]) =
    else: expr.error("failed to parse match expression")
 
 proc is_ident_aliased(ident: NimNode, unpack_args: seq[NimNode]): bool =
+   # We can only use an ident once in a scope, so make sure we it for the 'right' variable
    for arg in unpack_args:
       if arg.eq_ident"_" or ident != nil and ident.eq_ident(arg):
          return true
 
 proc process(unpack_args: var seq[NimNode], ident: NimNode) =
+   # Validate args and fulfill inference request or error.
    for i in 0 ..< unpack_args.len:
       unpack_args[i].expect(nnk_ident_like)
       if unpack_args[i].eq_ident"_":
@@ -64,11 +68,16 @@ proc process(unpack_args: var seq[NimNode], ident: NimNode) =
          unpack_args[i] = ident
 
 proc visit_elif_expr(expr: NimNode, safe: bool): NimNode =
+   # We don't want the user to be able to access any unitialized objects, so
+   # downcasts must be direct descendants of an `and`
    result = expr
    if expr.is_infix("and"):
+      # Safe because of short circuit evalution
       expr[1] = expr[1].visit_elif_expr(true)
       expr[2] = expr[2].visit_elif_expr(true)
    elif expr.is_infix"of":
+      # TODO: document invariants.
+      # XXX: we should probably guard again the unpack, unsafe_expect too...
       if not safe:
          expr.error("cannot prove match expression is safe")
       let ident = parse_of_ident(expr[1])
@@ -94,10 +103,14 @@ proc visit_elif_expr(expr: NimNode, safe: bool): NimNode =
       stmts.add(is_of_sym)
       result = stmts
    else:
+      # We can't safely rewrite anymore if we encounter an 'of' error out.
+      # XXX: of expressions in here might be unrelated and not relevant for
+      #      proving safety, so we should ignore them. a terminal nodes set to kill analysis?
       for i in 0 ..< expr.len:
          expr[i] = expr[i].visit_elif_expr(false)
 
 proc if_match(expr: NimNode, branches: NimNode): NimNode =
+   # simple rewrite to if statement.
    branches[0].expect(nnk_stmt_list)
    branches[0] = nnk_elif_branch.init(expr, branches[0])
    result = nnk_if_stmt.init()
@@ -113,8 +126,10 @@ proc case_match(expr: NimNode, branches: NimNode): NimNode =
       result.add(branch)
 
 proc `of`*[T: enum](kind: T, variant: T): bool = kind == variant
+   ## An alias for `==`
 
 proc `of`*[T: enum](kind: T, variants: set[T]): bool = kind in variants
+   ## An alias for `in`
 
 macro match*(self: untyped, branches: varargs[untyped]): untyped =
    ## TODO: add elif support for case like variant.

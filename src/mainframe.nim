@@ -9,6 +9,11 @@ import
    pkg/clstrfck/private/macros_core,
    std/os
 
+# handling vm
+# TODO: map fatal -> macros.error
+# TODO: map main -> to a mostly nop for
+# loses destructors but probably fine.
+
 macro when_native*(branches: varargs[untyped]): untyped {.AST.} =
    escape:
       branches.expect(1 .. 2)
@@ -71,11 +76,10 @@ proc is_clicolor_env: bool = get_env("CLICOLOR", "1") != "0"
 proc is_clicolor_force_env: bool = get_env("CLICOLOR_FORCE", "0") != "0"
 
 proc is_clicolor: bool =
-   template tmpl: auto = is_clicolor_env() or is_clicolor_force_env()
-   when nim_vm: tmpl()
+   when_native:
+      (is_clicolor_env() and is_a_tty(stdout)) or is_clicolor_force_env()
    else:
-      when defined(nim_script) or defined(js): tmpl()
-      else: (is_clicolor_env() and is_a_tty(stdout)) or is_clicolor_force_env()
+      is_clicolor_env() or is_clicolor_force_env()
 
 proc is_clicolor(f: File): bool =
    result = (is_clicolor_env() and is_a_tty(f)) or is_clicolor_force_env()
@@ -183,7 +187,7 @@ template exit_handler*(stmts: untyped) =
       finish(exit_request)
 
 template exit_handler*(on_exit: untyped, stmts: untyped) =
-   when nimvm: discard
+   when nim_vm: discard
    else:
       when not defined(nim_script):
          set_control_c_hook(proc {.no_conv.} =
