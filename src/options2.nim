@@ -1,5 +1,12 @@
-import clstrfck/private/matches
-export matches
+import
+   mainframe,
+   matchbook/private/matches
+from sugar import `=>`
+export matches, `=>`
+
+# TODO: this should be replaced by a more a more specialized option type generator.
+
+{.push warnings: off.}
 
 type
    DefaultIsNone* = pointer |
@@ -10,61 +17,89 @@ type
                c_string_array
    OptionKind* {.pure.} = enum None, Some
    Option* [T] {.pure.} = object {.inheritable.}
-      when T is DefaultIsNone:
-         value: T
+      when T is DefaultIsNone and T is_not NimNode:
+         val: T
       else:
-         value: T
+         val: T
          kind: OptionKind
    None* [T] = object of Option[T]
    Some* [T] = object of Option[T]
+
+{.pop.}
 
 proc `=`*[T](dst: var Option[T], src: Option[T]) =
    # XXX: genericAssign is the devil.
    for a, b in fields(dst, src):
       a = b
 
-proc kind*[T](self: Option[T]): OptionKind {.inherit.} =
-   when T is DefaultIsNone:
-      result = if self.value == default(T): OptionKind.None else: OptionKind.Some
+proc kind*[T](self: Option[T]): OptionKind =
+   when T is DefaultIsNone and T is_not NimNode:
+      result = if self.val == default(T): OptionKind.None else: OptionKind.Some
    else:
       result = self.kind
 
 proc `of`*[T](self: Option[T], Variant: type[Some]): bool = self.kind == OptionKind.Some
 proc `of`*[T](self: Option[T], Variant: type[None]): bool = self.kind == OptionKind.None
 
-proc unsafe_expect*[T](self: Option[T], Variant: type[Some]): Some[T] =
-   assert(self of Some)
-   result = cast[Some[T]](self)
-
-proc unsafe_expect*[T](self: Option[T], Variant: type[None]): None[T] =
-   assert(self of None)
-   result = cast[None[T]](self)
-
-proc some*[T](value: T): Some[T] =
-   when T is DefaultIsNone:
-      assert(value != default(T))
-      result = Some[T](value: value)
+proc some*[T](val: T): Option[T] =
+   when T is DefaultIsNone and T is_not NimNode:
+      assert(val != default(T))
+      result = Some[T](val: val)
    else:
-      result = Some[T](value: value, kind: OptionKind.Some)
+      result = Some[T](val: val, kind: OptionKind.Some)
 
-proc none*[T](_: type[T]): None[T] =
-   when T is DefaultIsNone:
-      assert(value == default(T))
+proc none*[T](_: type[T]): Option[T] =
+   when T is DefaultIsNone and T is_not NimNode:
+      assert(val == default(T))
       result = None[T]()
    else:
-      result = None[T](value: default(T), kind: OptionKind.None)
+      result = None[T](val: default(T), kind: OptionKind.None)
 
-template unpack*[T](self: Some[T], value_name: untyped) =
-   var value_name = self.value
+const
+   option_kinds = {OptionKind.None, OptionKind.Some}
+   some_kinds = {OptionKind.Some}
+   none_kinds = {OptionKind.None}
 
-proc `$`*[T](self: Option[T]): string {.inherit.} =
-   mixin `$`
-   match self of Some(_):
+proc rtti_range*(Self: type[Option]): set[OptionKind] = option_kinds
+proc rtti_range*(Self: type[Some]): set[OptionKind] = some_kinds
+proc rtti_range*(Self: type[None]): set[OptionKind] = none_kinds
+
+template unsafe_downconv*[T](self: Option[T], kinds: static[openarray[set[OptionKind]]]): auto =
+   when kinds == [option_kinds]: self
+   elif kinds == [some_kinds]: self.val
+   elif kinds == [none_kinds]: unsafe_conv(self, None[T])
+   else: {.fatal: "unreachable".}
+
+proc `$`*[T](self: Option[T]): string =
+   match self of Some:
       result = "Some("
       result.add_quoted(self)
       result.add(")")
    else:
       result = "None(" & $T & ")"
 
-proc `$`*[T](self: Some[T]): string = $Option[T](self)
-proc `$`*[T](self: None[T]): string = $Option[T](self)
+template `$`*[T](self: Some[T] | None[T]): string = $unsafe_object_cast(self, Option[T])
+
+proc expect*[T](self: var Option[T]): var T =
+   match self of Some: result = self
+   else: fatal("tried to unpack a 'None' variant")
+
+proc expect*[T](self: var Option[T], msg: string): var T =
+   match self of Some: result = self
+   else: fatal("tried to unpack a 'None' variant; ", msg)
+
+proc expect*[T](self: Option[T]): T =
+   match self of Some: result = self
+   else: fatal("tried to unpack a 'None' variant")
+
+proc expect*[T](self: Option[T], msg: string): T =
+   match self of Some: result = self
+   else: fatal("tried to unpack a 'None' variant; ", msg)
+
+proc map*[X, Y](self: Option[X], fn: proc (val: X): Y): Option[Y] =
+   match self of Some: result = some(fn(self))
+   else: result = none(Y)
+
+proc or_val*[T](self: Option[T], val: T): T =
+   match self of Some: result = self
+   else: result = val

@@ -1,33 +1,12 @@
-## Provides output and error output routines for the native backend and the vm/nimscript.
-## Also provides context and environment aware coloring routines.
-##
-## Respects https://bixense.com/clicolors/ and https://no-color.org/
-
-## This module trys to provide reliable and pretty application cleanup/termination handling.
-
 import
-   pkg/clstrfck/private/macros_core,
+   pkg/when_native,
+   pkg/macros2/private/core,
    std/os
 
 # handling vm
 # TODO: map fatal -> macros.error
 # TODO: map main -> to a mostly nop for
 # loses destructors but probably fine.
-
-macro when_native*(branches: varargs[untyped]): untyped {.AST.} =
-   escape:
-      branches.expect(1 .. 2)
-      for branch in branches:
-         branch.expect({nnk_stmt_list, nnk_else})
-      var non_native = if branches.len == 2: branches[1][0]
-                       else: nnk_discard_stmt.init(empty)
-   when nim_vm:
-      `non_native`
-   else:
-      when defined(nim_script) or defined(js):
-         `non_native`
-      else:
-         `branches[0]`
 
 type
    Logger* {.pure, inheritable.} = object ## base Logger, for no real purpose yet.
@@ -44,8 +23,8 @@ template file*(Self: type[Err] | Err): File = stderr
 
 macro log*(Self: type[Logger], arguments: varargs[untyped]) {.AST.} =
    escape:
-      let buf = nsk_var.init("buf")
-      let stmts = gen_stmts()
+      let buf = nsk_var.gen("buf")
+      let stmts = nnk_stmt_list{}
       for argument in arguments:
          stmts.add(!`buf`.add(`argument`))
    block:
@@ -76,10 +55,8 @@ proc is_clicolor_env: bool = get_env("CLICOLOR", "1") != "0"
 proc is_clicolor_force_env: bool = get_env("CLICOLOR_FORCE", "0") != "0"
 
 proc is_clicolor: bool =
-   when_native:
-      (is_clicolor_env() and is_a_tty(stdout)) or is_clicolor_force_env()
-   else:
-      is_clicolor_env() or is_clicolor_force_env()
+   when_native: (is_clicolor_env() and is_a_tty(stdout)) or is_clicolor_force_env()
+   else: is_clicolor_env() or is_clicolor_force_env()
 
 proc is_clicolor(f: File): bool =
    result = (is_clicolor_env() and is_a_tty(f)) or is_clicolor_force_env()
@@ -96,15 +73,15 @@ proc apply(str: string, code: int, enabled: bool = is_color_enabled()): string =
    if enabled: cmd(code) & str & cmd(0) else: str
 
 macro impl =
-   result = gen_stmts()
+   result = nnk_stmt_list{}
    for code, color in [30: "black", "red", "green", "yellow", "blue",
                        35: "magenta", "cyan", "white"]:
-      let code = code.new_lit
+      let code = code.lit
       for (name, ast) in {pub_ident(color): !`code`,
                           pub_ident("bg_" & color): !(`code` + 10),
                           pub_ident("bright_" & color): !(`code` + 60),
                           pub_ident("bg_bright_" & color): !(`code` + 10 + 60)}:
-         let is_color_enabled = "is_color_enabled".bind_sym
+         let is_color_enabled = "is_color_enabled".bind_ident
          let call = name[1]
          result.add_AST:
             template `name`(str: string, enabled: bool): string =
@@ -129,25 +106,20 @@ type ExitRequest* = object of CatchableError
    exit_code*: int
    write_trace*: bool
 
-proc init(
-      msg: string,
-      exit_code: int,
-      write_trace: bool
-      ): ref ExitRequest =
-   result = (ref ExitRequest)(msg: msg, exit_code: exit_code,
-                              write_trace: write_trace)
+proc init(msg: string, exit_code: int, write_trace: bool): ref ExitRequest =
+   result = (ref ExitRequest)(msg: msg, exit_code: exit_code, write_trace: write_trace)
 
-template exit*(write_trace = false) =
-   raise mainframe.init("", 0, write_trace)
+macro exit*(write_trace = false) {.AST.} =
+   raise `bind init`("", 0, `write_trace`)
 
-template exit*(msg: string, write_trace = false) =
-   raise mainframe.init(msg, 0, write_trace)
+macro exit*(msg: string, write_trace = false) {.AST.} =
+   raise `bind init`(`msg`, 0, `write_trace`)
 
-template exit*(exit_code: int, write_trace = false) =
-   raise mainframe.init("", exit_code, write_trace)
+macro exit*(exit_code: int, write_trace = false) {.AST.} =
+   raise `bind init`("", `exit_code`, `write_trace`)
 
-template exit*(msg: string, exit_code: int, write_trace = false) =
-   raise mainframe.init(msg, exit_code, write_trace)
+macro exit*(msg: string, exit_code: int, write_trace = false) {.AST.} =
+   raise `bind init`(`msg`, `exit_code`, `write_trace`)
 
 proc add*(self: var string, entry: StackTraceEntry) =
    self.add(entry.filename)
@@ -187,13 +159,11 @@ template exit_handler*(stmts: untyped) =
       finish(exit_request)
 
 template exit_handler*(on_exit: untyped, stmts: untyped) =
-   when nim_vm: discard
-   else:
-      when not defined(nim_script):
-         set_control_c_hook(proc {.no_conv.} =
-            write(stderr, stderr.bright_yellow("Signal Interrupt:"), " ctrl-c")
-            on_exit
-            quit(1))
+   when_native:
+      set_control_c_hook(proc {.no_conv.} =
+         write(stderr, stderr.bright_yellow("Signal Interrupt:"), " ctrl-c")
+         on_exit
+         quit(1))
    try:
       stmts
    except ExitRequest as exit_request:
