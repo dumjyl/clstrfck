@@ -4,8 +4,8 @@ import
    std/os
 
 # handling vm
-# TODO: map fatal -> macros.error
-# TODO: map main -> to a mostly nop for
+# FIXME: map fatal -> macros.error
+# FIXME: map main -> to a mostly nop for
 # loses destructors but probably fine.
 
 type
@@ -21,25 +21,25 @@ template file*(Self: type[Out] | Out): File = stdout
 template file*(Self: type[Err] | Err): File = stderr
    ## Return the `File` that `Self` is assoicated with.
 
-macro log*(Self: type[Logger], arguments: varargs[untyped]) {.AST.} =
-   escape:
-      let buf = nsk_var.gen("buf")
-      let stmts = nnk_stmt_list{}
-      for argument in arguments:
-         stmts.add(!`buf`.add(`argument`))
-   block:
-      when_native:
-         let file = `Self`.file
-         # XXX: nim bug: this gets c compiler error without decl.
-         var `buf` = get_buffer()
-         `stmts`
-         `buf`.add('\n')
-         file.write(`buf`)
-         file.flush_file
-      else:
-         var `buf` = get_buffer()
-         `stmts`
-         echo `buf`
+macro log*(Self: type[Logger], arguments: varargs[untyped]) =
+   let buf = nskVar.gen("buf")
+   let stmts = nnkStmtList{}
+   for argument in arguments:
+      stmts.add(!`buf`.add(`argument`))
+   result = AST:
+      block:
+         when_native:
+            let file = `Self`.file
+            # FIXME: nim bug: this gets c compiler error without decl.
+            var `buf` = get_buffer()
+            `stmts`
+            `buf`.add('\n')
+            file.write(`buf`)
+            file.flush_file
+         else:
+            var `buf` = get_buffer()
+            `stmts`
+            echo `buf`
 
 proc is_a_tty(f: File): bool =
    when defined(posix):
@@ -73,7 +73,7 @@ proc apply(str: string, code: int, enabled: bool = is_color_enabled()): string =
    if enabled: cmd(code) & str & cmd(0) else: str
 
 macro impl =
-   result = nnk_stmt_list{}
+   result = nnkStmtList{}
    for code, color in [30: "black", "red", "green", "yellow", "blue",
                        35: "magenta", "cyan", "white"]:
       let code = code.lit
@@ -100,7 +100,7 @@ macro impl =
                   `call`(str, `is_color_enabled`())
 impl()
 
-# TODO: Remap exceptions to same style.
+# FIXME: Remap exceptions to same style.
 
 type ExitRequest* = object of CatchableError
    exit_code*: int
@@ -109,17 +109,17 @@ type ExitRequest* = object of CatchableError
 proc init(msg: string, exit_code: int, write_trace: bool): ref ExitRequest =
    result = (ref ExitRequest)(msg: msg, exit_code: exit_code, write_trace: write_trace)
 
-macro exit*(write_trace = false) {.AST.} =
-   raise `bind init`("", 0, `write_trace`)
+macro exit*(write_trace = false) =
+   result = AST: raise `bind init`("", 0, `write_trace`)
 
-macro exit*(msg: string, write_trace = false) {.AST.} =
-   raise `bind init`(`msg`, 0, `write_trace`)
+macro exit*(msg: string, write_trace = false) =
+   result = AST: raise `bind init`(`msg`, 0, `write_trace`)
 
-macro exit*(exit_code: int, write_trace = false) {.AST.} =
-   raise `bind init`("", `exit_code`, `write_trace`)
+macro exit*(exit_code: int, write_trace = false) =
+   result = AST: raise `bind init`("", `exit_code`, `write_trace`)
 
-macro exit*(msg: string, exit_code: int, write_trace = false) {.AST.} =
-   raise `bind init`(`msg`, `exit_code`, `write_trace`)
+macro exit*(msg: string, exit_code: int, write_trace = false) =
+   result = AST: raise `bind init`(`msg`, `exit_code`, `write_trace`)
 
 proc add*(self: var string, entry: StackTraceEntry) =
    self.add(entry.filename)
@@ -129,7 +129,7 @@ proc add*(self: var string, entry: StackTraceEntry) =
    self.add(entry.proc_name)
 
 proc write_trace(exit_request: ref ExitRequest) =
-   # TODO: non native supprt :-/
+   # FIXME: non native supprt :-/
    let entries = exit_request.get_stack_trace_entries()
    if exit_request.write_trace and entries.len > 0:
       var buf: string

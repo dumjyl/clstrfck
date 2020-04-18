@@ -45,7 +45,9 @@ func lit[T](self: seq[T]): NimNode =
    result = ![]
    for val in self:
       result.add(val.lit)
-   result = !seq[`ident($T)`](`bind @` `result`)
+   result = !(`bind @` `result`)
+   if self.len == 0:
+      result = !seq[`ident($T)`](`result`)
 
 func lit*(self: LCAData): NimNode =
    result = !(typedesc(`bind LCAData`){`self.name.lit`, `self.kinds.lit`, `self.children.lit`})
@@ -67,8 +69,11 @@ func evaluate[T: enum](self: LCAData, kinds: set[T]): string {.time.} =
    sort(matches, proc (a, b: LCAMatch): int = cmp(a.depth, b.depth))
    result = matches[^1].name
 
-macro make_ident(val: static[string]): auto {.time.} = val.ident
+macro make_ident*(val: static[string]): auto = val.ident
 
-macro unsafe_lca_downconv*: auto =
-   let ident = !`bind evaluate`(`bind {}`(`bind LCAData`, type_of(self)), +kinds)
-   result = !`bind unsafe_conv`(self, `ident`)
+macro unsafe_lca_downconv*(self, kinds): auto =
+   # FIXME: is the static needed?
+   let ident_str = !static(`bind evaluate`(`!{}`(typedesc(`bind LCAData`),
+                                                 type_of(`self`)), +`kinds`))
+   result = !`bind unsafe_conv`(`self`, `bind make_ident`(`ident_str`))
+   echo result

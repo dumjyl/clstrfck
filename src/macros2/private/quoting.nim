@@ -1,5 +1,5 @@
 func into_ast*(self: NimNode): NimNode = self
-func into_ast*(self: Stmt): NimNode = self.sys
+func into_ast*(self: Stmt): NimNode = self.detail
 
 proc classify_quote_type(self: Stmt): Expr =
    # handle any possible mutation after quoting here, currently conservative.
@@ -12,15 +12,15 @@ proc internal_quote(stmts: Stmt, gensym: bool): StmtList =
    type VisitCtx = ref object
       args: seq[Expr] # arguments to pass to the get_ast call.
       params: seq[Ident] # param names to give the template
-      lift_stmts: StmtList
 
    proc add(self: VisitCtx, expr: Expr): Ident =
       self.args.add(Ident{"into_ast"}.call(expr))
-      self.params.add(Ident{nsk_var.gen.`$` & "_c8bd78kl46hqm9wpf0wnso8n0"}) # :-/
+      self.params.add(Ident{nskVar.gen.`$` & "_c8bd78kl46hqm9wpf0wnso8n0"}) # :-/
       result = self.params[^1]
 
    proc visitor(self: CompoundIdent, ctx: VisitCtx): Stmt =
-      # TODO: this check is bad for `!{}`; parsed as `Ident"!{}"`
+      result = self
+      # FIXME: this check is bad for `!{}`; parsed as `Ident"!{}"`
       if self[0] == Ident{"!"}:
          self.delete(0)
          result = self
@@ -36,9 +36,9 @@ proc internal_quote(stmts: Stmt, gensym: bool): StmtList =
 
    proc sym_visitor(self: Sym, ctx: tuple[]): Stmt = Ident{self.val}
 
-   let ctx = VisitCtx(lift_stmts: StmtList{})
-   let stmt_stripped = stmts of StmtList and stmts.sys.len == 1
-   # XXX: switch these next two stmts and segfault the compiler
+   let ctx = VisitCtx()
+   let stmt_stripped = stmts of StmtList and stmts.detail.len == 1
+   # FIXME(nim): switch these next two stmts and watch the compiler segfault
    let stmts = CompoundIdent.visit(Sym.visit(stmts, (), sym_visitor), ctx, visitor)
    let typ = stmts.classify_quote_type
 
@@ -48,7 +48,7 @@ proc internal_quote(stmts: Stmt, gensym: bool): StmtList =
                                 pragmas = [Ident{"dirty"}.Expr], body = some(stmts)}
    for param in ctx.params:
       templ_def.formals.add(param, typ = Ident{"untyped"})
-   result = StmtList{ctx.lift_stmts, templ_def}
+   result = StmtList{templ_def}
    template ctor(Self, val): auto = Sym{"{}"}.call(Ident{"typedesc"}.call(Self), val)
    var ast =
       if stmt_stripped: # add back a stmt list.
@@ -57,12 +57,12 @@ proc internal_quote(stmts: Stmt, gensym: bool): StmtList =
          ctor(typ, Sym{"get_ast"}.call(templ_sym.call(ctx.args)))
    result.add(ast)
 
-macro AST*(stmts): untyped = internal_quote(Stmt{stmts}, gensym = false).sys
+macro AST*(stmts): untyped = internal_quote(Stmt{stmts}, gensym = false).detail
    ## An untyped quoting operator with some extensions.
-   ##
-   ## TODO: document extensions
 
-macro AST_gensym*(stmts): untyped = internal_quote(Stmt{stmts}, gensym = true).sys
+   # FIXME: document extensions
+
+macro AST_gensym*(stmts): untyped = internal_quote(Stmt{stmts}, gensym = true).detail
    ## A quoting operator similar to `macros.quote`.
 
 template add_AST*(self, stmts): untyped = add(self, AST(stmts))
@@ -71,4 +71,4 @@ template add_AST*(self, stmts): untyped = add(self, AST(stmts))
 macro `!`*(expr): untyped =
    ## An alias for `AST`, for concise expression generation.
    let expr = Expr{expr}.skip(Paren, n = 1)
-   result = internal_quote(expr, gensym = false).sys
+   result = internal_quote(expr, gensym = false).detail

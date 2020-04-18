@@ -8,7 +8,7 @@ when defined(vm_timings):
 
    var timings {.compile_time.} = init_Table[string, seq[float]]()
 
-   const expr_kinds = nnk_call_kinds + {nnk_obj_constr, nnk_dot_expr}
+   const nnkExprKinds = nnkCallKinds + {nnkObjConstr, nnkDotExpr}
 
    macro time*(fn): untyped =
       result = fn
@@ -16,8 +16,8 @@ when defined(vm_timings):
                      ")@" & $fn.name)
       if fn.params[0].kind != nnk_empty and fn.body.len == 1 and fn.body[0] of expr_kinds:
          fn.body[0] = !(result = `fn.body[0]`)
-      let time_sym = nsk_let.gen
-      let duration_sym = nsk_let.gen
+      let time_sym = nskLet.gen
+      let duration_sym = nskLet.gen
       fn.body.insert(0, AST do:
          {.no_side_effect.}:
             let `time_sym` = `bind cpu_time`())

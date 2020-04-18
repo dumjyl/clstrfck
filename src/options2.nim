@@ -4,7 +4,8 @@ import
 from sugar import `=>`
 export matches, `=>`
 
-# TODO: this should be replaced by a more a more specialized option type generator.
+# FIXME: consider a wrapopt like std/wrapnil
+# FIXME: this should be replaced by a more a more specialized option type generator.
 
 {.push warnings: off.}
 
@@ -28,7 +29,7 @@ type
 {.pop.}
 
 proc `=`*[T](dst: var Option[T], src: Option[T]) =
-   # XXX: genericAssign is the devil.
+   # FIXME: genericAssign is the devil.
    for a, b in fields(dst, src):
       a = b
 
@@ -53,7 +54,7 @@ proc none*[T](_: type[T]): Option[T] =
       assert(val == default(T))
       result = None[T]()
    else:
-      result = None[T](val: default(T), kind: OptionKind.None)
+      result = None[T](val: unsafe_default(T), kind: OptionKind.None)
 
 const
    option_kinds = {OptionKind.None, OptionKind.Some}
@@ -90,11 +91,15 @@ proc expect*[T](self: var Option[T], msg: string): var T =
 
 proc expect*[T](self: Option[T]): T =
    match self of Some: result = self
-   else: fatal("tried to unpack a 'None' variant")
+   else:
+      fatal("tried to unpack a 'None' variant")
+      result = unsafe_default(T)
 
 proc expect*[T](self: Option[T], msg: string): T =
    match self of Some: result = self
-   else: fatal("tried to unpack a 'None' variant; ", msg)
+   else:
+      fatal("tried to unpack a 'None' variant; ", msg)
+      result = unsafe_default(T)
 
 proc map*[X, Y](self: Option[X], fn: proc (val: X): Y): Option[Y] =
    match self of Some: result = some(fn(self))

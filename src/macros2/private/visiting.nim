@@ -27,8 +27,8 @@ proc visit*[Visit: StmtAllMeta; Ctx](
             self[i] = self[i].v
       of AnyCall:
          self.name = self.name.v
-         for i in 0 ..< self.arguments.len:
-            self.arguments[i] = self.arguments[i].v
+         for i in 0 ..< self.args.len:
+            self.args[i] = self.args[i].v
       of ForLoop:
          for i in 0 ..< self.vars.len:
             self.vars[i] = self.vars[i].v
@@ -43,4 +43,4 @@ proc visit*[Visit: StmtAllMeta; Ctx](
             self.label = self.label.expect.v
          self.body = self.body.v
       of SingleSym, Ident, Lit, Comment, Unexposed: discard # nothing to recurse
-      else: self.error("TODO: visit{", self.kind, "}")
+      else: self.error("FIXME: visit{", self.kind, "}")

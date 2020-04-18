@@ -3,14 +3,14 @@ import macros2/private/core
 when false:
    proc skip_typedesc(T: NimNode): NimNode =
       result = T.get_type_inst
-      if result of nty_typedesc:
+      if result of ntyTypeDesc:
          result = result[1]
 
    macro forward_generic_params*(X: typedesc, Y: typedesc): typedesc =
-      # TODO: skip aliases too
+      # FIXME: skip aliases too
       let X = X.skip_typedesc
       let Y = Y.skip_typedesc
-      if X of nnk_bracket_expr:
+      if X of nnkBracketExpr:
          result = X.copy
          result[0] = Y
       else:
@@ -41,3 +41,12 @@ proc `+`*[T](sets: openarray[set[T]]): set[T] =
       result.incl(set)
 
 func kind*(self: enum): enum = self
+
+proc unsafe_default*(T: typedesc): T =
+   {.push warning[UnsafeDefault]: off.}
+   result = default(T)
+   {.pop.}
+
+template is_mutable*[T](self: var T): bool = true
+
+template is_mutable*[T](self: T): bool = false

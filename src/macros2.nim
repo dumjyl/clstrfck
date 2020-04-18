@@ -1,33 +1,22 @@
-## Naming conventions for type hierarchies
-##    `FooRecordsMeta` is a typeclass containing all variants below `Foo` with a singular enum `kind`.
-##    `FooChildrenMeta` is a typeclass containing all types below `Foo`.
-##    `FooAllMeta` is a typeclass like `FooChildrenMeta` but containing `Foo` too.
-
 # Every nimnode must go through a canonicalizing Stmt`{}`
 
-# TODO: restrict AnyIdent to weed out invalid bound sym kinds.
-
-# TODO: make static[int] expect work
-#   expect erroring
-
-# TODO: should expect always return a value? but sometimes we just want to verify a property.
+# FIXME: indexing should not introduce subtle bugs, we need to handle backwards better.
+# FIXME: restrict AnyIdent to weed out invalid bound sym kinds.
+# FIXME: make static[int] expect work
+# FIXME: should expect always return a value? but sometimes we just want to verify a property.
 #       {.discardable.}?
-
-# XXX: we generate a lot of stuff which is not so nice for doc generation.
-# TODO: expect_match
-
-# TODO: CompoundIdent can hold syms.
+# FIXME: we generate a lot of stuff which is not so nice for doc generation.
+# FIXME: expect_match
+# FIXME: CompoundIdent can hold syms.
 
 import
    std/sequtils,
    mainframe,
    options2,
-   matchbook/private/matches,
-   macros2/private/[vm_timings, expects]
+   macros2/private/[vm_timings, gen]
 
-export
-   expects,
-   matches
+import macros2/private/expects; export expects
+import matchbook/private/matches; export matches
 
 from std/strutils import join
 from std/macros import nil
@@ -35,9 +24,7 @@ import macros2/private/core except AST, add_AST, `!`, lit, bind_ident, ident
 
 export NimNode
 
-import macros2/private/gens
-
-gens Stmt:
+generate Stmt:
    Unexposed
    Expr:
       StmtList
@@ -99,20 +86,20 @@ gens Stmt:
          NilLit
       Container:
          ExprContainer:
-            Paren # in the form `(expr)` only
+            Paren   # in the form `(expr)` only
             Bracket # [a, b, c] # simple
-         Curly # {1, 2, 3} or {a: 123, b: "abc"} or mixed {x, "blah": x, y}
+         Curly      # {1, 2, 3} or {a: 123, b: "abc"} or mixed {x, "blah": x, y}
          RecordConstr:
             ObjectConstr # Foo(a: 123) can be mixed like curly
-            TupleConstr # () | (,) | (1, 2) | (a: 123) can be mixed too
+            TupleConstr  # () | (,) | (1, 2) | (a: 123) can be mixed too
       AnyCall:
-         Call # foo(a, b)
-         CommandCall # foo a, b
+         Call          # foo(a, b)
+         CommandCall   # foo a, b
          StringLitCall # foo"abc"
-         CurlyCall # foo{"abc"}
-         BracketCall # foo["abc"]
+         CurlyCall     # foo{"abc"}
+         BracketCall   # foo["abc"]
          OperatorCall:
-            InfixCall # 1 + 1
+            InfixCall  # 1 + 1
             PrefixCall # $x
       Conv
       Dot
@@ -141,72 +128,28 @@ gens Stmt:
    Discard
    Comment
 
-gens MaybeColon:
+generate MaybeColon:
    NoColon
    Colon
 
-gens AnyVarDef:
+generate AnyVarDef:
    IdentVarDef
-   UnpackVarDef
+   TupleVarDef
 
 type
    NimNodeParseError* = object of ValueError
       node: NimNode
    Formals* = object ## The non-generic, non-return-type parameters of a function.
-      sys: NimNode
+      detail: NimNode
    Arguments* = object ## The arguments of some sort of call.
-      sys: NimNode
+      detail: NimNode
    ForLoopVars* = object
-      sys: NimNode
+      detail: NimNode
    IdentDef* = object ## A triplet of `AnyIdent, Option[Expr], Option[Expr]`
-      sys: NimNode
+      detail: NimNode
    Pragmas* = object
-      sys: NimNode
+      detail: NimNode
    Index* = int | BackwardsIndex ## The index type apis should be migrated too.
-
-const
-   # routine_name_pos = 0
-   # routine_pattern_pos = 1
-   # routine_generic_params_pos = 2
-   routine_params_pos = 3
-   # routine_pragmas_pos = 4
-   # routine_reserved_pos = 5
-   routine_body_pos = 6
-
-template impl_expect(x, y) {.dirty.} =
-   proc expect*[X: x; Y: y](self: X, _: type[Y]): Y {.time.} =
-      {.push hint[ConvFromXToItSelfNotNeeded]: off.}
-      ## Cast `self` to `T` or error fatally.
-      if self of Y: result = unsafe_conv(self, Y)
-      else:
-         # TODO: make this nicer
-         when defined(dump_node) and X is Stmt:
-            dbg self
-         fatal("expected variant: ", Y, ", got variant: ", self.kind)
-      {.pop.}
-
-template impl_field(T, f, FT, i) {.dirty.} =
-   proc f*(self: T): FT = FT{self.sys[i]}
-   proc `f=`*(self: T, val: FT) = self.sys[i] = val.sys
-
-template impl_items(T) {.dirty.} =
-   iterator items*(self: T): auto =
-      for i in 0 ..< self.len:
-         yield self[i]
-
-template impl_slice_index(T, Val) {.dirty.} =
-   proc `[]`*(self: T, i: HSlice): seq[Val] =
-      template idx(x): int =
-         when x is BackwardsIndex: self.len - int(x) else: int(x)
-      for i in idx(i.a) .. idx(i.b):
-         result.add(self[i])
-
-template impl_container(T, Val: untyped, offset: untyped = 0) {.dirty.} =
-   func len*(self: T): int = self.sys.len - offset
-   proc `[]`*(self: T, i: Index): Val = Val{self.sys[i + offset]}
-   proc `[]=`*(self: T, i: Index, val: Val) = self.sys[i + offset] = val.sys
-   impl_items(T)
-   impl_slice_index(T, Val)
 
 # --- NimNode
 
@@ -223,194 +166,204 @@ proc canon_and_verify(self: NimNode): NimNode {.time.} =
    ## Perform AST canonicalization here.
    result = self
    match self:
-   of nnk_formal_params:
+   of nnkFormalParams:
       var ident_defs = seq[NimNode].default
       for i in 1 ..< self.len:
          for j in 0 ..< self[i].len - 2:
-            ident_defs.add(nnk_ident_defs{self[i][j], self[i][^2], self[i][^1]})
+            ident_defs.add(nnkIdentDefs{self[i][j], self[i][^2], self[i][^1]})
       self.set_len(1)
       for ident_def in ident_defs:
          self.add(ident_def)
-   of nnk_stmt_list, nnk_stmt_list_expr:
-      # 2
-      # TODO: stmt list flattening?
+   of nnkStmtListLike:
+      # FIXME: stmt list flattening?
       for i in 0 ..< self.len:
          self[i] = self[i].v
-   of nnk_acc_quoted:
+   of nnkAccQuoted:
       for i in 0 ..< self.len:
          self[i] = self[i].v
-         self[i].expect(nnk_ident_like)
-   of nnk_call:
+         self[i].expect(nnkIdentLike)
+   of nnkCall:
       for i in 0 ..< self.len:
          self[i] = self[i].v
-   of nnk_ident, nnk_sym: discard
+   of nnkIdent, nnkSym: discard
    else:
       when false:
-         self.error("TODO: canonicalize " & $self.kind & " \n" & self.tree_repr)
+         self.error("FIXME: canonicalize " & $self.kind & " \n" & self.tree_repr)
       else:
          for i in 0 ..< self.len:
             self[i] = self[i].v
 
 # --- Stmt
 
-template throw_ast(self: Stmt, msg = "") = throw_ast(self.sys, msg)
+template throw_ast(self: Stmt, msg = "") = throw_ast(self.detail, msg)
 
-func `==`*(a: StmtAllMeta, b: StmtAllMeta): bool = a.sys == b.sys
+func `==`*(a: StmtAllMeta, b: StmtAllMeta): bool = a.detail == b.detail
    ## Uses same equality as `NimNode`.
 
-template unsafe_downconv(self: Stmt, kinds: openarray[set[StmtKind]]): auto = unsafe_lca_downconv()
+template unsafe_downconv*(self: Stmt, kinds: openarray[set[StmtKind]]): auto =
+   unsafe_lca_downconv(self, kinds)
 
 func `{}`*(Self: type[StmtKind], kind: NimSymKind): Self
 
 func `{}`*(Self: type[StmtKind], node: NimNode): Self {.time.} =
+   if node.is_uninit: node.throw_ast("node is not initialized")
    match node:
-   of nnk_ident: StmtKind.Ident
-   of nnk_acc_quoted: StmtKind.CompoundIdent
-   of nnk_open_sym_choice: StmtKind.OpenChoiceSym
-   of nnk_closed_sym_choice: StmtKind.ClosedChoiceSym
-   of nnk_sym: StmtKind{node.sym_kind}
+   of nnkIdent: StmtKind.Ident
+   of nnkAccQuoted: StmtKind.CompoundIdent
+   of nnkOpenSymChoice: StmtKind.OpenChoiceSym
+   of nnkClosedSymChoice: StmtKind.ClosedChoiceSym
+   of nnkSym: StmtKind{node.sym_kind}
 
-   of nnk_char_lit: StmtKind.CharLit
-   of nnk_int_lit: StmtKind.IntLit
-   of nnk_int8_lit: StmtKind.Int8Lit
-   of nnk_int16_lit: StmtKind.Int16Lit
-   of nnk_int32_lit: StmtKind.Int32Lit
-   of nnk_int64_lit: StmtKind.Int64Lit
-   of nnk_uint_lit: StmtKind.UIntLit
-   of nnk_uint8_lit: StmtKind.UInt8Lit
-   of nnk_uint16_lit: StmtKind.UInt16Lit
-   of nnk_uint32_lit: StmtKind.UInt32Lit
-   of nnk_uint64_lit: StmtKind.UInt64Lit
-   of nnk_float_lit: StmtKind.FloatLit
-   of nnk_float32_lit: StmtKind.Float32Lit
-   of nnk_float64_lit: StmtKind.Float64Lit
-   of nnk_float128_lit: StmtKind.Float128Lit
-   of nnk_str_lit: StmtKind.StringLit
-   of nnk_triple_str_lit: StmtKind.MultilineStringLit
-   of nnk_nil_lit: StmtKind.NilLit
-   of nnk_curly, nnk_table_constr: StmtKind.Curly
-   of nnk_tuple_constr: StmtKind.TupleConstr
-   of nnk_par:
-      if node.len == 1 and node[0].kind != nnk_expr_colon_expr: StmtKind.Paren
+   of nnkCharLit: StmtKind.CharLit
+   of nnkIntLit: StmtKind.IntLit
+   of nnkInt8Lit: StmtKind.Int8Lit
+   of nnkInt16Lit: StmtKind.Int16Lit
+   of nnkInt32Lit: StmtKind.Int32Lit
+   of nnkInt64Lit: StmtKind.Int64Lit
+   of nnkUIntLit: StmtKind.UIntLit
+   of nnkUInt8Lit: StmtKind.UInt8Lit
+   of nnkUInt16Lit: StmtKind.UInt16Lit
+   of nnkUInt32Lit: StmtKind.UInt32Lit
+   of nnkUInt64Lit: StmtKind.UInt64Lit
+   of nnkFloatLit: StmtKind.FloatLit
+   of nnkFloat32Lit: StmtKind.Float32Lit
+   of nnkFloat64Lit: StmtKind.Float64Lit
+   of nnkFloat128Lit: StmtKind.Float128Lit
+   of nnkStrLit: StmtKind.StringLit
+   of nnkTripleStrLit: StmtKind.MultilineStringLit
+   of nnkNilLit: StmtKind.NilLit
+   of nnkCurly, nnkTableConstr: StmtKind.Curly
+   of nnkTupleConstr: StmtKind.TupleConstr
+   of nnkPar:
+      if node.len == 1 and node[0].kind != nnkExprColonExpr: StmtKind.Paren
       else: StmtKind.TupleConstr
-   of nnk_bracket: StmtKind.Bracket
-   of nnk_rstr_lit: StmtKind.StringLitCall # own kind | StringLitCall | property on string lit.
-   of nnk_call: StmtKind.Call
-   of nnk_prefix: StmtKind.PrefixCall
-   of nnk_infix: StmtKind.InfixCall
-   of nnk_command: StmtKind.CommandCall
-   of nnk_call_str_lit: StmtKind.StringLitCall
-   of nnk_proc_def: StmtKind.ProcDecl
-   of nnk_func_def: StmtKind.FuncDecl
-   of nnk_iterator_def: StmtKind.IteratorDecl
-   of nnk_converter_def: StmtKind.ConverterDecl
-   of nnk_method_def: StmtKind.MethodDecl
-   of nnk_template_def: StmtKind.TemplateDecl
-   of nnk_macro_def: StmtKind.MacroDecl
-   of nnk_stmt_list, nnk_stmt_list_expr, nnk_stmt_list_type: StmtKind.StmtList
-   of nnk_block_stmt, nnk_block_expr, nnk_block_type: StmtKind.Block
-   of nnk_asgn, nnk_fast_asgn: StmtKind.Asgn
-   of nnk_conv, nnk_obj_down_conv, nnk_obj_up_conv, nnk_hidden_sub_conv,
-      nnk_string_to_cstring, nnk_cstring_to_string: StmtKind.Conv
-   of nnk_obj_constr: StmtKind.ObjectConstr
-   of nnk_comment_stmt: StmtKind.Comment
-   of nnk_for_stmt, nnk_par_for_stmt: StmtKind.ForLoop # TODO: expose the par part
-   of nnk_while_stmt: StmtKind.WhileLoop
-   of nnk_curly_expr: StmtKind.CurlyCall
-   of nnk_bracket_expr: StmtKind.BracketCall
-   of nnk_pragma_expr: StmtKind.PragmaExpr
-   of nnk_ref_ty: StmtKind.RefTypeExpr
-   of nnk_ptr_ty: StmtKind.PtrTypeExpr
-   of nnk_var_ty: StmtKind.VarTypeExpr
-   of nnk_dot_expr: StmtKind.Dot
-   of nnk_discard_stmt: StmtKind.Discard
-   of nnk_type_section: StmtKind.TypeDefs
-   of nnk_var_section: StmtKind.VarDefs
-   of nnk_let_section: StmtKind.LetDefs
-   of nnk_const_section: StmtKind.ConstDefs
-   of nnk_dot_call,
-         nnk_type,
-         nnk_comes_from,
-         nnk_postfix,
-         nnk_hidden_call_conv,
-         nnk_var_tuple,
-         nnk_range, nnk_checked_field_expr,
-         nnk_if_expr, nnk_elif_expr, nnk_else_expr,
-         nnk_lambda, nnk_do, # wth is do
-         nnk_hidden_std_conv,
-         nnk_cast, nnk_static_expr,
-         nnk_expr_eq_expr,
+   of nnkBracket: StmtKind.Bracket
+   of nnkRStrLit: StmtKind.StringLitCall # own kind | StringLitCall | property on string lit.
+   of nnkCall: StmtKind.Call
+   of nnkPrefix: StmtKind.PrefixCall
+   of nnkInfix: StmtKind.InfixCall
+   of nnkCommand: StmtKind.CommandCall
+   of nnkCallStrLit: StmtKind.StringLitCall
+   of nnkProcDef: StmtKind.ProcDecl
+   of nnkFuncDef: StmtKind.FuncDecl
+   of nnkIteratorDef: StmtKind.IteratorDecl
+   of nnkConverterDef: StmtKind.ConverterDecl
+   of nnkMethodDef: StmtKind.MethodDecl
+   of nnkTemplateDef: StmtKind.TemplateDecl
+   of nnkMacroDef: StmtKind.MacroDecl
+   of nnkStmtListLike: StmtKind.StmtList
+   of nnkBlockLike: StmtKind.Block
+   of nnkAsgn, nnkFastAsgn: StmtKind.Asgn
+   of nnkConv, nnkObjDownConv, nnkObjUpConv, nnkHiddenSubConv, nnkStringToCString,
+         nnkCStringToString: StmtKind.Conv
+   of nnkObjConstr: StmtKind.ObjectConstr
+   of nnkCommentStmt: StmtKind.Comment
+   of nnkForStmt, nnk_par_for_stmt: StmtKind.ForLoop # FIXME: expose the par part
+   of nnkWhileStmt: StmtKind.WhileLoop
+   of nnkCurlyExpr: StmtKind.CurlyCall
+   of nnkBracketExpr: StmtKind.BracketCall
+   of nnkPragmaExpr: StmtKind.PragmaExpr
+   of nnkRefTy: StmtKind.RefTypeExpr
+   of nnkPtrTy: StmtKind.PtrTypeExpr
+   of nnkVarTy: StmtKind.VarTypeExpr
+   of nnkDotExpr: StmtKind.Dot
+   of nnkDiscardStmt: StmtKind.Discard
+   of nnkTypeSection: StmtKind.TypeDefs
+   of nnkVarSection: StmtKind.VarDefs
+   of nnkLetSection: StmtKind.LetDefs
+   of nnkConstSection: StmtKind.ConstDefs
+   of nnkDotCall,
+         nnkType,
+         nnkComesFrom,
+         nnkPostfix,
+         nnkHiddenCallConv,
+         nnkVarTuple,
+         nnkRange, nnkCheckedFieldExpr,
 
-         nnk_expr_colon_expr, # error: Colon
-         nnk_ident_defs, # error: IdentDef
-         nnk_type_def, # error: TypeDef
-         nnk_formal_params, # error: Formals
-         nnk_pragma, # error: Pragmas
-         nnk_else, # error: part of If | Case | When
-         nnk_of_inherit, # error: part of object blah
+         nnkLambda, nnkDo, # wth is do
+         nnkHiddenStdConv,
+         nnkCast, nnkStaticExpr,
+         nnkExprEqExpr,
 
-         nnk_addr, nnk_hidden_addr, # Addr
-         nnk_deref_expr, nnk_hidden_deref, # Deref
-         nnk_asm_stmt,
-         nnk_mixin_stmt, nnk_bind, nnk_bind_stmt,
-         nnk_const_ty, nnk_mutable_ty, nnk_shared_ty, # unused
+         nnkIfLike,
+         nnkElifLike,
+         nnkElseLike,
 
-         nnk_chck_range_f, nnk_chck_range64, nnk_chck_range,
+         nnkExprColonExpr, # error: Colon
+         nnkIdentDefs, # error: IdentDef
+         nnkTypeDef, # error: TypeDef
+         nnkFormalParams, # error: Formals
+         nnkPragma, # error: Pragmas
 
-         nnk_import_stmt, nnk_import_except_stmt,
-         nnk_export_stmt, nnk_export_except_stmt,
-         nnk_from_stmt, nnk_include_stmt,
+         nnkOfInherit, # error: part of object blah
 
-         nnk_import_as, nnk_of_branch, nnk_elif_branch,
-         nnk_pragma_block, nnk_if_stmt,
-         nnk_when_stmt,
-         nnk_case_stmt, nnk_yield_stmt, nnk_defer,
-         nnk_return_stmt,
-         nnk_break_stmt, nnk_continue_stmt, nnk_static_stmt,
-         nnk_using_stmt,
-         nnk_with, nnk_without, nnk_type_of_expr, nnk_object_ty,
-         nnk_tuple_ty, nnk_tuple_class_ty, nnk_type_class_ty, nnk_static_ty,
-         nnk_rec_list, nnk_rec_case, nnk_rec_when, nnk_distinct_ty,
-         nnk_proc_ty, nnk_iterator_ty, nnk_enum_ty,
-         nnk_enum_field_def, nnk_arglist, nnk_pattern,
-         nnk_closure, nnk_goto_state, nnk_state, nnk_break_state,
+         nnkAddr, nnkHiddenAddr, # Addr
+         nnkDerefExpr, nnkHiddenDeref, # Deref
+         nnkAsmStmt,
+         nnkMixinStmt, nnkBind, nnkBindStmt,
+         nnkConstTy, nnkMutableTy, nnkSharedTy, # unused
 
-         nnk_try_stmt, nnk_hidden_try_stmt, nnk_finally, nnk_except_branch, nnk_raise_stmt,
+         nnkChckRangeF, nnkChckRange64, nnkChckRange,
 
-         nnk_const_def, nnk_generic_params,
-         nnk_none, nnk_empty:
+         nnkImportStmt, nnkImportExceptStmt,
+         nnkExportStmt, nnkExportExceptStmt,
+         nnkFromStmt, nnkIncludeStmt,
+
+         nnkImportAs,
+         nnkOfBranch,
+         nnkPragmaBlock,
+         nnkWhenStmt,
+         nnkCaseStmt,
+         nnkYieldStmt, nnkDefer,
+         nnkReturnStmt,
+         nnkBreakStmt, nnkContinueStmt, nnkStaticStmt,
+         nnkUsingStmt, # UsingDefs
+
+         nnkTypeOfExpr, nnkObjectTy,
+         nnkTupleTy, nnkTupleClassTy, nnkTypeClassTy, nnkStaticTy,
+         nnkRecList, nnkRecCase, nnkRecWhen, nnkDistinctTy,
+         nnkProcTy, nnkIteratorTy, nnkEnumTy,
+         nnkEnumFieldDef, nnkArgList, nnkPattern,
+         nnkClosure, nnkGotoState, nnkState, nnkBreakState,
+
+         nnkTryStmt, nnkHiddenTryStmt, nnkFinally, nnkExceptBranch, nnkRaiseStmt,
+
+         nnkConstDef, nnkGenericParams,
+         nnkWith, nnkWithout,
+         nnkNone, nnkEmpty:
       node.throw_ast("unexpected kind resolution: " & $node.kind)
 
-proc kind*(self: Stmt): StmtKind = StmtKind{self.sys}
+proc kind*(self: Stmt): StmtKind = StmtKind{self.detail}
 
 impl_expect Stmt, StmtAllMeta
 
 proc `{}`*(Self: type[StmtAllMeta], node: NimNode): Self =
    ## Constructor for any `Stmt` from a NimNode, performs canonicalizations. Low level api.
-   {.line.}: expect(Stmt(sys: canon_and_verify(node)), Self)
+   {.line.}: expect(Stmt(detail: canon_and_verify(node)), Self)
 
-func `$`*(self: Stmt): string {.time.} = $self.sys
+func `$`*(self: Stmt): string {.time.} = $self.detail
 
 template `$`*(self: StmtChildrenMeta): string = $unsafe_conv(self, Stmt)
 
 func copy*[T: Stmt](self: T): T {.time.} =
    ## Perform a recusive copy of `self`
-   result = T(sys: self.sys.copy)
+   result = T(detail: self.detail.copy)
 
-func error(self: Stmt, msg: varargs[string, `$`]) {.time.} =
-   # TODO: dump node here
-   core.error(msg.join, self.sys)
+func error*(self: Stmt, msg: varargs[string, `$`]) {.time.} =
+   # FIXME: dump node here
+   core.error(msg.join, self.detail)
 
-proc dbg*(self: Stmt | Colon | IdentDef | ForLoopVars)
+proc dbg*(self: Stmt | Colon | IdentDef | ForLoopVars | AnyVarDef)
 proc dbg_repr*(self: ForLoopVars): string
 proc dbg_repr*(self: MaybeColon): string
 proc dbg_repr*(self: IdentDef): string
 proc dbg_repr*(self: Pragmas): string
+proc dbg_repr*(self: AnyVarDef): string
 proc dbg_repr*(self: Stmt): string
 
 proc verbose_note*(self: Stmt | ForLoopVars): string {.time.} =
    when defined(dump_node):
-      result = expects.enclose(self.dbg_repr) & '\n' & expects.enclose($self.sys)
+      result = expects.enclose(self.dbg_repr) & '\n' & expects.enclose($self.detail)
    else:
       result = "Note: recompile with '-d:dump_node' to dump the offending node"
 
@@ -431,48 +384,50 @@ template expect*(self: untyped, expected_len: static[int], msg: string = ""): au
 # `compound identifier` # a backticked ident or multiple idents. also abused for quoting expressions.
 # symbols # single bound sym, open/closed sym choices
 
-# routine name # can be postfixed, TODO: no pragmas?
+# routine name # can be postfixed, FIXME: no pragmas?
 
-# TODO: merge result with var sym? but what does the `impl` look like return?
+# FIXME: merge result with var sym? but what does the `impl` look like return?
 
 func `{}`(Self: type[StmtKind], kind: NimSymKind): Self =
    case kind:
-   of nsk_unknown, nsk_conditional, nsk_dyn_lib, nsk_temp, nsk_stub: StmtKind.UnexposedSym
-   of nsk_param: StmtKind.ParamSym
-   of nsk_generic_param: StmtKind.GenericParamSym
-   of nsk_module: StmtKind.ModuleSym
-   of nsk_type: StmtKind.TypeSym
-   of nsk_var: StmtKind.VarSym
-   of nsk_let: StmtKind.LetSym
-   of nsk_const: StmtKind.ConstSym
-   of nsk_result: StmtKind.ResultSym
-   of nsk_proc: StmtKind.ProcSym
-   of nsk_func: StmtKind.FuncSym
-   of nsk_method: StmtKind.MethodSym
-   of nsk_iterator: StmtKind.IteratorSym
-   of nsk_converter: StmtKind.ConverterSym
-   of nsk_macro: StmtKind.MacroSym
-   of nsk_template: StmtKind.TemplateSym
-   of nsk_field: StmtKind.FieldSym
-   of nsk_enum_field: StmtKind.EnumFieldSym
-   of nsk_for_var: StmtKind.ForVarSym
-   of nsk_label: StmtKind.LabelSym
+   of nskUnknown, nskConditional, nskDynLib, nskTemp, nskStub: StmtKind.UnexposedSym
+   of nskParam: StmtKind.ParamSym
+   of nskGenericParam: StmtKind.GenericParamSym
+   of nskModule: StmtKind.ModuleSym
+   of nskType: StmtKind.TypeSym
+   of nskVar: StmtKind.VarSym
+   of nskLet: StmtKind.LetSym
+   of nskConst: StmtKind.ConstSym
+   of nskResult: StmtKind.ResultSym
+   of nskProc: StmtKind.ProcSym
+   of nskFunc: StmtKind.FuncSym
+   of nskMethod: StmtKind.MethodSym
+   of nskIterator: StmtKind.IteratorSym
+   of nskConverter: StmtKind.ConverterSym
+   of nskMacro: StmtKind.MacroSym
+   of nskTemplate: StmtKind.TemplateSym
+   of nskField: StmtKind.FieldSym
+   of nskEnumField: StmtKind.EnumFieldSym
+   of nskForVar: StmtKind.ForVarSym
+   of nskLabel: StmtKind.LabelSym
 
 # --- Ident
 
 proc `{}`*(Self: type[Ident], val: string): Self = Ident{macros.ident(val)}
    ## Create a new unbound identifier.
 
+proc `==`*(a: Ident, b: string): bool = macros.eq_ident(a.detail, b)
+
 # --- CompoundIdent
 
 impl_container CompoundIdent, AnyIdent
 
-proc delete*(self: CompoundIdent, i: Index) = core.delete(self.sys, i)
+proc delete*(self: CompoundIdent, i: Index) = core.delete(self.detail, i)
 
 proc `{}`*(Self: type[CompoundIdent], vals: varargs[AnyIdent]): Self =
-   result = Self{nnk_acc_quoted{}}
+   result = Self{nnkAccQuoted{}}
    for val in vals:
-      result.sys.add(val.sys)
+      result.detail.add(val.detail)
 
 # --- ChoiceSym
 
@@ -481,12 +436,13 @@ impl_container ChoiceSym, SingleSym
 # --- AnyIdent
 
 proc val*(self: AnyIdent): string =
+   # FIXME: nim bug: self instantiates endlessly, must use inner.
    match self:
    of ChoiceSym: result = self[0].val
    of CompoundIdent:
       for ident in self:
          result &= ident.val
-   else: result = macros.str_val(self.sys)
+   else: result = macros.str_val(self.detail)
 
 # --- SymRecordsMeta
 
@@ -496,174 +452,173 @@ proc `{}`*(Self: type[SymRecordsMeta]): Self = gen(Self)
 
 func `{}`(Self: type[NimSymKind], T: type[SymRecordsMeta]): Self =
    when T is UnexposedSym: static_error("cannot generate an UnexposedSym")
-   elif T is ParamSym: nsk_param
-   elif T is GenericParamSym: nsk_generic_param
-   elif T is ModuleSym: nsk_module
-   elif T is TypeSym: nsk_type
-   elif T is VarSym: nsk_var
-   elif T is LetSym: nsk_let
-   elif T is ConstSym: nsk_const
-   elif T is ResultSym: nsk_result
-   elif T is ProcSym: nsk_proc
-   elif T is FuncSym: nsk_func
-   elif T is MethodSym: nsk_method
-   elif T is IteratorSym: nsk_iterator
-   elif T is ConverterSym: nsk_converter
-   elif T is MacroSym: nsk_macro
-   elif T is TemplateSym: nsk_template
-   elif T is FieldSym: nsk_field
-   elif T is EnumFieldSym: nsk_enum_field
-   elif T is ForVarSym: nsk_for_var
-   elif T is LabelSym: nsk_label
+   elif T is ParamSym: nskParam
+   elif T is GenericParamSym: nskGenericParam
+   elif T is ModuleSym: nskModule
+   elif T is TypeSym: nskType
+   elif T is VarSym: nskVar
+   elif T is LetSym: nskLet
+   elif T is ConstSym: nskConst
+   elif T is ResultSym: nskResult
+   elif T is ProcSym: nskProc
+   elif T is FuncSym: nskFunc
+   elif T is MethodSym: nskMethod
+   elif T is IteratorSym: nskIterator
+   elif T is ConverterSym: nskConverter
+   elif T is MacroSym: nskMacro
+   elif T is TemplateSym: nskTemplate
+   elif T is FieldSym: nskField
+   elif T is EnumFieldSym: nskEnumField
+   elif T is ForVarSym: nskForVar
+   elif T is LabelSym: nskLabel
    else: static_error("cannot generate a symbol of type: ", T)
 
 
-# XXX: nim bug: cannon use Sym{core.bind_ident(val)}, bind_ident is an actual symbol not nimnode
+# FIXME(nim): cannon use Sym{core.bind_ident(val)}, bind_ident is an actual symbol not nimnode
 #proc bind_ident(val: static[string]): Sym =
 #   ## Bind a new symbol from `val`.
-#   result = Sym(sys: core.bind_ident(val))
-#   assert(result.sys != nil)
+#   result = Sym(detail: core.bind_ident(val))
+#   assert(result.detail != nil)
 
 proc `{}`*(Self: type[Sym], val: static[string]): Self = Sym{macros.bind_sym(val)}
 
 func skip_ident_quals(self: NimNode): NimNode =
    match self:
-   of nnk_postfix:
+   of nnkPostfix:
       assert(self.len == 2)
       assert(self[0].eq_ident("*"))
       result = skip_ident_quals(self[1])
-   of nnk_ident_like: result = self
+   of nnkIdentLike: result = self
    else: self.error("unhandled ident quals")
 
 # --- IdentDef
 
-proc ident*(self: IdentDef): AnyIdent = AnyIdent{self.sys[0].skip_ident_quals}
+proc ident*(self: IdentDef): AnyIdent = AnyIdent{self.detail[0].skip_ident_quals}
    ## Return the ident in `self` skipping any backquotes or export markers.
 
 proc typ*(self: IdentDef): Option[Expr] =
-   result = if self.sys[^2] of nnk_empty: none(Expr) else: some(Expr{self.sys[^2]})
+   result = if self.detail[^2] of nnkEmpty: none(Expr) else: some(Expr{self.detail[^2]})
 
 proc `typ=`*(self: IdentDef, typ: Option[Expr]) =
-   match typ of Some: self.sys[^2] = typ.sys
-   else: self.sys[^2] = nnk_empty{}
+   match typ of Some: self.detail[^2] = typ.detail
+   else: self.detail[^2] = nnkEmpty{}
 
-proc `typ=`*(self: IdentDef, typ: Expr) = self.sys[^2] = typ.sys
+proc `typ=`*(self: IdentDef, typ: Expr) = self.detail[^2] = typ.detail
 
 proc val*(self: IdentDef): Option[Expr] =
-   result = if self.sys[^1] of nnk_empty: none(Expr) else: some(Expr{self.sys[^1]})
+   result = if self.detail[^1] of nnkEmpty: none(Expr) else: some(Expr{self.detail[^1]})
 
-proc `val=`*(self: IdentDef, val: Expr) = self.sys[^1] = val.sys
+proc `val=`*(self: IdentDef, val: Expr) = self.detail[^1] = val.detail
 
-proc `$`*(self: IdentDef): string = $self.sys
+proc `$`*(self: IdentDef): string = $self.detail
    ## Render this `IdentDef` as source code.
 
-template empty_opt(self): NimNode = self.map((x) => x.sys).or_val(nnk_empty{})
+template empty_opt(self): NimNode = self.map((x) => x.detail).or_val(nnkEmpty{})
 
 proc `{}`*(Self: type[IdentDef], ident_def: NimNode): IdentDef =
-   Self(sys: ident_def.canon_and_verify)
+   Self(detail: ident_def.canon_and_verify)
 
 proc `{}`*(Self: type[IdentDef], name: AnyIdent, typ = none(Expr), val = none(Expr)): Self =
-   result = Self(sys: nnk_ident_defs{name.sys, empty_opt(typ), empty_opt(val)})
+   result = Self(detail: nnkIdentDefs{name.detail, empty_opt(typ), empty_opt(val)})
 
 # --- Formals
 
 impl_container Formals, IdentDef, 1
 
 func add(self: Formals, name: AnyIdent, typ: Expr, val: Expr) =
-   self.sys.add(IdentDef{name, some(typ), some(val)}.sys)
+   self.detail.add(IdentDef{name, some(typ), some(val)}.detail)
 
 func add(self: Formals, name: AnyIdent, typ: Expr) =
-   self.sys.add(IdentDef{name, some(typ), none(Expr)}.sys)
+   self.detail.add(IdentDef{name, some(typ), none(Expr)}.detail)
 
 func formals*(self: RoutineDecl): Formals =
-   result = Formals(sys: self.sys[routine_params_pos])
+   result = Formals(detail: self.detail[routine_params_pos])
 
 # --- StmtList
 
 proc `{}`*(Self: type[StmtList], stmts: varargs[Stmt]): Self =
-   result = Self{nnk_stmt_list{}}
+   result = Self{nnkStmtList{}}
    for stmt in stmts:
-      result.sys.add(stmt.sys)
+      result.detail.add(stmt.detail)
 
 impl_container StmtList, Stmt
 
-func add*(self: StmtList, stmt: Stmt) = self.sys.add(stmt.sys)
+func add*(self: StmtList, stmt: Stmt) = self.detail.add(stmt.detail)
 
 # --- RoutineDecl
 
 func `{}`(Self: type[NimNodeKind], kind: RoutineDeclKind): Self =
    match kind:
-   of ProcDecl: nnk_proc_def
-   of FuncDecl: nnk_func_def
-   of IteratorDecl: nnk_iterator_def
-   of ConverterDecl: nnk_converter_def
-   of MethodDecl: nnk_method_def
-   of TemplateDecl: nnk_template_def
-   of MacroDecl: nnk_macro_def
+   of ProcDecl: nnkProcDef
+   of FuncDecl: nnkFuncDef
+   of IteratorDecl: nnkIteratorDef
+   of ConverterDecl: nnkConverterDef
+   of MethodDecl: nnkMethodDef
+   of TemplateDecl: nnkTemplateDef
+   of MacroDecl: nnkMacroDef
 
 func `{}`(Self: type[NimNodeKind], T: type[RoutineDeclRecordsMeta]): Self =
-   when T is ProcDecl: nnk_proc_def
-   elif T is FuncDecl: nnk_func_def
-   elif T is IteratorDecl: nnk_iterator_def
-   elif T is ConverterDecl: nnk_converter_def
-   elif T is MethodDecl: nnk_method_def
-   elif T is TemplateDecl: nnk_template_def
-   elif T is MacroDecl: nnk_macro_def
+   when T is ProcDecl: nnkProcDef
+   elif T is FuncDecl: nnkFuncDef
+   elif T is IteratorDecl: nnkIteratorDef
+   elif T is ConverterDecl: nnkConverterDef
+   elif T is MethodDecl: nnkMethodDef
+   elif T is TemplateDecl: nnkTemplateDef
+   elif T is MacroDecl: nnkMacroDef
    else: {.fatal: "unreachable".}
 
 func return_type*(self: RoutineDecl): Option[Expr] =
    ## Get the return type of `self` if it has one.
-   if self.sys[routine_params_pos][0] of nnk_empty:
+   if self.detail[routine_params_pos][0] of nnkEmpty:
       result = none Expr
    else:
-      result = some Expr(sys: self.sys[routine_params_pos][0])
+      result = some Expr(detail: self.detail[routine_params_pos][0])
 
 func `return_type=`*(self: RoutineDecl, typ: Expr) =
    ## Set the return type of `self`.
-   self.sys[routine_params_pos][0] = typ.sys
+   self.detail[routine_params_pos][0] = typ.detail
 
 proc body*(self: RoutineDecl): Option[Stmt] =
    ## Return the body of this `RoutineDecl` if it has one.
-   match self.sys[routine_body_pos]:
-   of nnk_empty: none(Stmt)
-   else: some(Stmt{self.sys[routine_body_pos]})
+   match self.detail[routine_body_pos] of nnkEmpty: none(Stmt)
+   else: some(Stmt{self.detail[routine_body_pos]})
 
 proc `body=`*(self: RoutineDecl, stmt: Stmt) =
    ## Set the body of this `RoutineDecl`.
-   self.sys[routine_body_pos] = stmt.sys
+   self.detail[routine_body_pos] = stmt.detail
 
 proc copy_as*(self: RoutineDecl, kind: RoutineDeclKind): RoutineDecl =
    result = RoutineDecl{NimNodeKind{kind}{}}
-   for n in self.sys:
-      result.sys.add(n.copy)
+   for n in self.detail:
+      result.detail.add(n.copy)
 
 proc copy_as*(self: RoutineDecl, T: type[RoutineDeclRecordsMeta]): RoutineDecl =
    result = self.copy_as(first(rtti_range(T)))
 
 func read_pub(self: NimNode): bool =
-   # TODO: account for sem checked symbols here too.
+   # FIXME: account for sem checked symbols here too.
    match self:
-   of nnk_postfix: result = true
+   of nnkPostfix: result = true
    else: result = false
 
-func pub*(self: RoutineDecl): bool = self.sys[0].read_pub
+func pub*(self: RoutineDecl): bool = self.detail[0].read_pub
 
 func `pub=`(self: RoutineDecl, val: bool) =
-   match self.sys[0]:
-   of nnk_postfix:
-      assert(self.sys[0][0].eq_ident("*"))
+   match self.detail[0]:
+   of nnkPostfix:
+      assert(self.detail[0][0].eq_ident("*"))
       if not val:
-         self.sys[0] = self.sys[0][1]
+         self.detail[0] = self.detail[0][1]
    elif val:
-      self.sys[0] = nnk_postfix{"*", self.sys[0]}
+      self.detail[0] = nnkPostfix{"*", self.detail[0]}
 
-proc ident*(self: RoutineDecl): AnyIdent = AnyIdent{self.sys[0].skip_ident_quals}
+proc ident*(self: RoutineDecl): AnyIdent = AnyIdent{self.detail[0].skip_ident_quals}
 
 func `ident=`*(self: RoutineDecl, name: AnyIdent) =
    ## Set the name of `self` to
-   match self.sys[0]:
-   of nnk_postfix: self.sys[0][1] = name.sys
-   of nnk_acc_quoted, nnk_ident, nnk_sym: self.sys[0] = name.sys
+   match self.detail[0]:
+   of nnkPostfix: self.detail[0][1] = name.detail
+   of nnkAccQuoted, nnkIdent, nnkSym: self.detail[0] = name.detail
    else: self.throw_ast
 
 proc `{}`*(
@@ -675,66 +630,66 @@ proc `{}`*(
       pragmas: openarray[Expr] = [],
       ): Self =
    ## Initializer for routine decls.
-   let params = nnk_formal_params{}
+   let params = nnkFormalParams{}
    match return_type of Some:
-      params.add(return_type.sys)
+      params.add(return_type.detail)
    else:
-      params.add(nnk_empty{})
+      params.add(nnkEmpty{})
    for formal in formals:
-      params.add(formal.sys)
+      params.add(formal.detail)
    var pragmas =
       if pragmas.len > 0:
-         let pragma_node = nnk_pragma{}
+         let pragma_node = nnkPragma{}
          for pragma in pragmas:
-            pragma_node.add(pragma.sys)
+            pragma_node.add(pragma.detail)
          pragma_node
       else:
-         nnk_empty{}
+         nnkEmpty{}
    var body = block:
-      match body of Some: body.sys
-      else: nnk_empty{}
+      match body of Some: body.detail
+      else: nnkEmpty{}
    result = Self{NimNodeKind{Self}{
-      ident.sys, # name
-      nnk_empty{}, # patterns
-      nnk_empty{}, # TODO: generic params
+      ident.detail, # name
+      nnkEmpty{}, # patterns
+      nnkEmpty{}, # FIXME: generic params
       params,
       pragmas,
-      nnk_empty{}, # reserved
+      nnkEmpty{}, # reserved
       body}}
 
 # --- Arguments
 
 impl_container Arguments, Expr, 1
 
-proc arguments*(self: AnyCall): Arguments = Arguments(sys: self.sys)
+proc args*(self: AnyCall): Arguments = Arguments(detail: self.detail)
 
 # --- AnyCall
 
 impl_field AnyCall, name, Expr, 0
 
-template unpack*(self: AnyCall, name_name: untyped, arguments_name: untyped) =
+template unpack*(self: AnyCall, name_name: untyped, args_name: untyped) =
    template name_name: Expr {.used.} = self.name
    template `name_name=`(val: Expr) {.used.} = self.name = val
-   template arguments_name: Arguments {.used.} = self.arguments
+   template args_name: Arguments {.used.} = self.args
 
 # --- Call
 
-proc add*(self: Call, argument: Expr) =
-   self.sys.add(argument.sys)
+proc add*(self: Call, arg: Expr) =
+   self.detail.add(arg.detail)
 
-proc `{}`*(Self: type[Call], name: AnyIdent, arguments: varargs[Expr]): Self =
-   result = Self{nnk_call{name.sys}}
-   for argument in arguments:
-      result.add(argument)
+proc `{}`*(Self: type[Call], name: AnyIdent, args: varargs[Expr]): Self =
+   result = Self{nnkCall{name.detail}}
+   for arg in args:
+      result.add(arg)
 
-proc bind_call*(self: static[string], arguments: varargs[Expr]): Call =
-   result = Call{Sym{self}, arguments}
+proc bind_call*(self: static[string], args: varargs[Expr]): Call =
+   result = Call{Sym{self}, args}
 
-proc call*(self: AnyIdent, arguments: varargs[Expr]): Call = Call{self, arguments}
+proc call*(self: AnyIdent, args: varargs[Expr]): Call = Call{self, args}
 
-proc call*(self: RoutineDecl, arguments: varargs[Expr]): Call = Call{self.ident, arguments}
+proc call*(self: RoutineDecl, args: varargs[Expr]): Call = Call{self.ident, args}
 
-# XXX: careful, adding to a Paren can mutate it into an anonymous tuple constructor.
+# FIXME: careful, adding to a Paren can mutate it into an anonymous tuple constructor.
 
 # --- TypeExpr
 
@@ -743,14 +698,14 @@ impl_field TypeExpr, val, Expr, 0
 # --- MaybeColon
 
 proc kind*(self: MaybeColon): MaybeColonKind =
-   match self.sys.kind of nnk_expr_colon_expr: MaybeColonKind.Colon
+   match self.detail.kind of nnkExprColonExpr: MaybeColonKind.Colon
    else: MaybeColonKind.NoColon
 
-proc `{}`*(Self: type[MaybeColon], node: NimNode): Self = Self(sys: node.canon_and_verify)
+proc `{}`*(Self: type[MaybeColon], node: NimNode): Self = Self(detail: node.canon_and_verify)
 
 template unsafe_downconv*(self: MaybeColon, kinds: openarray[set[MaybeColonKind]]): auto =
-   when type_of(unsafe_lca_downconv()) is NoColon: val(unsafe_lca_downconv())
-   else: unsafe_lca_downconv()
+   when type_of(unsafe_lca_downconv(self, kinds)) is NoColon: val(unsafe_lca_downconv(self, kinds))
+   else: unsafe_lca_downconv(self, kinds)
 
 impl_expect MaybeColon, MaybeColonAllMeta
 
@@ -760,13 +715,14 @@ impl_field Colon, name, Expr, 0
 
 impl_field Colon, val, Expr, 1
 
-proc `{}`*(Self: type[Colon], node: NimNode): Self = Self(sys: node.canon_and_verify)
+proc `{}`*(Self: type[Colon], node: NimNode): Self = Self(detail: node.canon_and_verify)
 
-proc `{}`*(Self: type[Colon], name, val: Expr): Self = Self{nnk_expr_colon_expr{name.sys, val.sys}}
+proc `{}`*(Self: type[Colon], name, val: Expr): Self =
+   result = Self{nnkExprColonExpr{name.detail, val.detail}}
 
 # --- NoColon
 
-proc val*(self: NoColon): Expr = Expr{self.sys}
+proc val*(self: NoColon): Expr = Expr{self.detail}
 
 # --- Container
 
@@ -774,15 +730,15 @@ proc offset*(self: Container): int =
    match self of ObjectConstr: 1
    else: 0
 
-proc len*(self: Container): int = self.sys.len - self.offset
+proc len*(self: Container): int = self.detail.len - self.offset
 
-proc `[]`*(self: Container, i: Index): MaybeColon = MaybeColon{self.sys[i + self.offset]}
+proc `[]`*(self: Container, i: Index): MaybeColon = MaybeColon{self.detail[i + self.offset]}
 
 proc `[]=`*(self: Container, i: Index, maybe_colon: MaybeColon) =
-   self.sys[i + self.offset] = maybe_colon.sys
+   self.detail[i + self.offset] = maybe_colon.detail
 
 proc `[]=`*(self: Container, i: Index, expr: Expr) =
-   self.sys[i + self.offset] = expr.sys
+   self.detail[i + self.offset] = expr.detail
 
 impl_items Container
 
@@ -792,11 +748,11 @@ impl_container ExprContainer, Expr
 
 # --- ObjectConstr
 
-# TODO: name can be an option too...
+# FIXME: name can be an option too for typechecked nodes...
 
-proc name*(self: ObjectConstr): Expr = Expr{self.sys[0]}
+proc name*(self: ObjectConstr): Expr = Expr{self.detail[0]}
 
-func `name=`*(self: ObjectConstr, expr: Expr) = self.sys[0] = expr.sys
+func `name=`*(self: ObjectConstr, expr: Expr) = self.detail[0] = expr.detail
 
 template unpack*(self: ObjectConstr, name_name: untyped, fields_name: untyped) =
    template name_name: Expr {.used.} = self.name
@@ -804,79 +760,96 @@ template unpack*(self: ObjectConstr, name_name: untyped, fields_name: untyped) =
 
 # --- Pragmas
 
-proc `{}`*(Self: type[Pragmas], node: NimNode): Self = Self(sys: node.canon_and_verify)
+proc `{}`*(Self: type[Pragmas], node: NimNode): Self = Self(detail: node.canon_and_verify)
+
+proc `{}`*(Self: type[Pragmas]): Self = Self(detail: nnkPragma{})
 
 impl_container Pragmas, MaybeColon
 
 # --- PragmaExpr
 
-proc expr*(self: PragmaExpr): Expr = Expr{self.sys[0]}
+proc expr*(self: PragmaExpr): Expr = Expr{self.detail[0]}
 
-proc pragmas*(self: PragmaExpr): Pragmas = Pragmas{self.sys[1]}
+proc pragmas*(self: PragmaExpr): Pragmas = Pragmas{self.detail[1]}
 
 # --- StringLit
 
 func lit*(val: string): StringLit =
-   result = StringLit(sys: nnk_str_lit{})
-   macros.`str_val=`(result.sys, val)
+   result = StringLit(detail: nnkStrLit{})
+   macros.`str_val=`(result.detail, val)
 
 # --- AnyVarDef
 
-# TODO: maybe expose the availability of the let/const val.
+# FIXME: maybe expose the availability of the let/const val.
 
 proc kind*(self: AnyVarDef): AnyVarDefKind =
-   match self.sys:
-   of nnk_ident_defs, nnk_const_def: AnyVarDefKind.IdentVarDef
-   of nnk_var_tuple: AnyVarDefKind.UnpackVarDef
-   else: self.sys.throw_ast
+   match self.detail:
+   of nnkIdentDefs, nnkConstDef: AnyVarDefKind.IdentVarDef
+   of nnkVarTuple: AnyVarDefKind.TupleVarDef
+   else: self.detail.throw_ast
 
 template unsafe_downconv*(self: AnyVarDef, kinds: openarray[set[AnyVarDefKind]]): auto =
-   when type_of(unsafe_lca_downconv()) is IdentVarDef: IdentDef{unsafe_lca_downconv().sys}
-   else: unsafe_lca_downconv()
+   when type_of(unsafe_lca_downconv(self, kinds)) is IdentVarDef:
+      IdentDef{unsafe_lca_downconv(self, kinds).detail}
+   else: unsafe_lca_downconv(self, kinds)
 
-# --- UnpackVarDef
+proc `{}`*(Self: type[AnyVarDef], node: NimNode): Self = Self(detail: node)
 
-proc len*(self: UnpackVarDef): int = self.sys.len - 2
+# --- TupleVarDef
 
-proc `[]`*(self: UnpackVarDef, i: Index): AnyIdent = AnyIdent{self.sys[i]}
+proc len*(self: TupleVarDef): int = self.detail.len - 2
 
-proc `[]=`*(self: UnpackVarDef, i: Index, ident: AnyIdent) = self.sys[i] = ident.sys
+proc `[]`*(self: TupleVarDef, i: Index): AnyIdent = AnyIdent{self.detail[i]}
 
-impl_items UnpackVarDef
+proc `[]=`*(self: TupleVarDef, i: Index, ident: AnyIdent) = self.detail[i] = ident.detail
 
-impl_field UnpackVarDef, typ, Expr, ^2
+impl_items TupleVarDef
 
-impl_field UnpackVarDef, val, Expr, ^1
+# FIXME: duplicated with IdentDef
+
+proc typ*(self: TupleVarDef): Option[Expr] =
+   result = if self.detail[^2] of nnkEmpty: none(Expr) else: some(Expr{self.detail[^2]})
+
+proc `typ=`*(self: TupleVarDef, typ: Option[Expr]) =
+   match typ of Some: self.detail[^2] = typ.detail
+   else: self.detail[^2] = nnkEmpty{}
+
+proc `typ=`*(self: TupleVarDef, typ: Expr) = self.detail[^2] = typ.detail
+
+proc val*(self: TupleVarDef): Option[Expr] =
+   result = if self.detail[^1] of nnkEmpty: none(Expr) else: some(Expr{self.detail[^1]})
+
+proc `val=`*(self: TupleVarDef, val: Expr) = self.detail[^1] = val.detail
 
 # --- AnyVarDefs
 
 template `{}`(Self: type[NimNodeKind], T: type[AnyVarDefsRecordsMeta]): Self =
-   when T is VarDefs: nnk_var_section
-   elif T is LetDefs: nnk_let_section
-   elif T is VarDefs: nnk_const_section
+   when T is VarDefs: nnkVarSection
+   elif T is LetDefs: nnkLetSection
+   elif T is VarDefs: nnkConstSection
    else: {.fatal: "unreachable".}
 
 func `{}`*(Self: type[AnyVarDefsRecordsMeta], name: AnyIdent, val: Expr): Self =
-   result = Self(sys: NimNodeKind{Self}{})
-   when result is VarDefs or result is LetDefs: # XXX nim bug: when this is a match statement weird case coverage errors.
-      result.sys.add(init(IdentDef, name, val = some(val)).sys)
-   elif result is ConstDefs: {.fatal: "TODO".}
+   result = Self(detail: NimNodeKind{Self}{})
+   when result is VarDefs or result is LetDefs: # FIXME(nim): when this is a match statement weird case coverage errors, the code doesn't make sense but the error message was nonsense.
+      result.detail.add(IdentDef{name, val = some(val)}.detail)
+   elif result is ConstDefs: {.fatal: "FIXME".}
    else: {.fatal: "unreachable".}
 
-impl_container AnyVarDefs, VarDefs
+impl_container AnyVarDefs, AnyVarDef
 
 # --- Block
 
 func `{}`(Self: type[Block], stmts: varargs[Stmt]): Self =
-   # XXX: stmt list vs stmt list expr
-   result = Self{nnk_block_stmt{nnk_empty{}, StmtList{stmts}.sys}}
+   # FIXME: stmt list vs stmt list expr
+   result = Self{nnkBlockStmt{nnkEmpty{}, StmtList{stmts}.detail}}
 
 proc label*(self: Block): Option[AnyIdent] =
-   match self.sys[0]:
-   of nnk_ident_like: some(AnyIdent{self.sys[0]})
+   match self.detail[0]:
+   of nnkIdentLike: some(AnyIdent{self.detail[0]})
    else: none(AnyIdent)
 
-proc `label=`*(self: Block, val: AnyIdent) = self.sys[0] = val.sys
+proc `label=`*(self: Block, val: AnyIdent) = self.detail[0] = val.detail
 
 impl_field Block, body, Stmt, 1
 
@@ -887,7 +860,7 @@ impl_field Dot, rhs, Expr, 1
 
 # --- Asgn
 
-func `{}`*(Self: type[Asgn], lhs, rhs: Expr): Self = Self{nnk_asgn{lhs.sys, rhs.sys}}
+func `{}`*(Self: type[Asgn], lhs, rhs: Expr): Self = Self{nnkAsgn{lhs.detail, rhs.detail}}
 
 impl_field Asgn, lhs, Expr, 0
 impl_field Asgn, rhs, Expr, 1
@@ -898,18 +871,18 @@ template unpack*(self: Asgn, lhs_name, rhs_name) =
 
 # --- Discard
 
-func `{}`*(Self: type[Discard]): Self = Self{nnk_discard_stmt{nnk_empty{}}}
+func `{}`*(Self: type[Discard]): Self = Self{nnkDiscardStmt{nnkEmpty{}}}
 
 # --- Comment
 
-func val*(self: Comment): string = macros.str_val(self.sys)
+func val*(self: Comment): string = macros.str_val(self.detail)
 
 template unpack*(self: Comment, val_name) =
    template val_name: string = self.val
 
 # --- ForLoop
 
-proc vars*(self: ForLoop): ForLoopVars = ForLoopVars(sys: self.sys)
+proc vars*(self: ForLoop): ForLoopVars = ForLoopVars(detail: self.detail)
 
 impl_field ForLoop, expr, Expr, ^2
 
@@ -922,39 +895,40 @@ template unpack*(self: ForLoop, vars_name, expr_name, body_name) =
 
 # --- ForLoopVars
 
-# TODO: expose the structure of these somehow, right now they are being flattened.
+# FIXME: expose the structure of these somehow, right now they are being flattened.
+#        treat them similar to AnyVarDef
 
 proc collect_for_loop_vars(self: NimNode): seq[NimNode] =
    for i in 0 ..< self.len - 2:
       match self[i]:
-      of nnk_ident_like: result.add(self[i])
-      of nnk_var_tuple:
+      of nnkIdentLike: result.add(self[i])
+      of nnkVarTuple:
          for j in 0 ..< self[i].len - 1:
             match self[i][j]:
-            of nnk_ident_like: result.add(self[i][j])
+            of nnkIdentLike: result.add(self[i][j])
             else: self[i][j].error("unreachable")
       else: self[i].error("unreachable")
 
-proc len*(self: ForLoopVars): int = self.sys.collect_for_loop_vars.len
+proc len*(self: ForLoopVars): int = self.detail.collect_for_loop_vars.len
 
-proc `[]`*(self: ForLoopVars, i: Index): AnyIdent = AnyIdent{collect_for_loop_vars(self.sys)[i]}
+proc `[]`*(self: ForLoopVars, i: Index): AnyIdent = AnyIdent{collect_for_loop_vars(self.detail)[i]}
 
 proc `[]=`*(self: ForLoopVars, i: Index, ident: AnyIdent) =
    var cur_var_i = 0
    template check(x) =
       if i == cur_var_i: x
       inc(cur_var_i)
-   for var_base_i in 0 ..< self.sys.len - 2:
-      match self.sys[var_base_i]:
-      of nnk_ident_like:
-         check: self.sys[var_base_i] = ident.sys
-      of nnk_var_tuple:
-         for tuple_i in 0 ..< self.sys[var_base_i].len - 1:
-            match self.sys[var_base_i][tuple_i]:
-            of nnk_ident_like:
-               check: self.sys[var_base_i][tuple_i] = ident.sys
-            else: self.sys[var_base_i][tuple_i].error("unreachable")
-      else: self.sys[var_base_i].error("unreachable")
+   for var_base_i in 0 ..< self.detail.len - 2:
+      match self.detail[var_base_i]:
+      of nnkIdentLike:
+         check: self.detail[var_base_i] = ident.detail
+      of nnkVarTuple:
+         for tuple_i in 0 ..< self.detail[var_base_i].len - 1:
+            match self.detail[var_base_i][tuple_i]:
+            of nnkIdentLike:
+               check: self.detail[var_base_i][tuple_i] = ident.detail
+            else: self.detail[var_base_i][tuple_i].error("unreachable")
+      else: self.detail[var_base_i].error("unreachable")
 
 impl_items ForLoopVars
 
@@ -966,19 +940,18 @@ proc lit*(val: bool): EnumFieldSym =
 proc skip(self: Stmt, Skip: type[Paren], n = high(int)): Stmt =
    result = self
    while true:
-      match result of Paren and n > 0: Stmt(result) = result
+      match result as paren of Paren and n > 0: result = paren
       else: break
 
 include macros2/private/[dbg, visiting, quoting]
 
 proc m2_parse_type(typ: Expr): auto =
-   match typ:
-   of Curly: result = (macro_type: none(Expr),
-                       variant_type: some(typ.expect(1).expect(NoColon).val))
+   match typ of Curly: result = (macro_type: none(Expr),
+                                 variant_type: some(typ.expect(1).expect(NoColon).val))
    else: typ.error("failed to parse 'm2' type expression")
 
 macro m2*(macro_decl): auto =
-   # TODO: fix doc comments
+   # FIXME: fix doc comments, they are hidden in inner_def
    ## Process macro signature extensions. This is a pragma macro for macros.
 
    let def = Stmt{macro_decl}.expect(MacroDecl)
@@ -989,14 +962,8 @@ macro m2*(macro_decl): auto =
 
    match def.return_type of Some:
       let type_info = m2_parse_type(return_type)
-      match type_info.macro_type of Some:
-         def.return_type = macro_type
-      else:
-         def.return_type = !auto
-      match type_info.variant_type of Some:
-         inner_def.return_type = variant_type
-      else:
-         inner_def.return_type = !Stmt
+      def.return_type = type_info.macro_type.or_val(!auto)
+      inner_def.return_type = type_info.variant_type.or_val(!Stmt)
    else:
       def.return_type = !auto
       inner_def.return_type = !Stmt
@@ -1005,20 +972,15 @@ macro m2*(macro_decl): auto =
    for i in 0 ..< def.formals.len:
       match def.formals[i].typ of Some:
          let type_info = m2_parse_type(typ)
-         match type_info.macro_type of Some:
-            def.formals[i].typ = macro_type
-         else:
-            def.formals[i].typ = !auto
-         match type_info.variant_type of Some:
-            inner_def.formals[i].typ = variant_type
-            call.add(!`variant_type`{`def.formals[i].ident`})
-         else:
-            inner_def.formals[i].typ = !Stmt
-            call.add(!Stmt{`def.formals[i].ident`})
+         def.formals[i].typ = type_info.macro_type
+         inner_def.formals[i].typ = type_info.variant_type.or_val(!Stmt)
+         call.add(type_info.variant_type
+                     .map((typ) => !`typ`{`def.formals[i].ident`})
+                     .or_val(!Stmt{`def.formals[i].ident`}))
+      else:
+         def.error("FIXME")
 
    def.body = AST:
       `inner_def`
-      result = `call`.sys
-   result = def.sys
-   dbg def
-   echo def
+      result = `call`.detail
+   result = def.detail

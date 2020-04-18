@@ -22,17 +22,15 @@ template all_typeclass(ir: IR): string = ir.name & "AllMeta"
 
 template kind(ir: IR): string = ir.name & "Kind"
 
-# TODO: {.lazy.} for var templates
-
 iterator items(ir: IR): IR =
    for ir in ir.children:
       yield ir
 
 func `{}`(Self: type[IR], n: NimNode): IR {.time.} =
    result = IR()
-   if n of nnk_ident:
+   if n of nnkIdent:
       result.name = $n
-   elif n of nnk_call and n.len == 2 and n[1] of nnk_stmt_list:
+   elif n of nnkCall and n.len == 2 and n[1] of nnkStmtList:
       result.name = $n[0]
       for stmt in n[1]:
          result.children.add(IR{stmt})
@@ -55,23 +53,32 @@ func `{}`(Self: type[IR], base, derived: NimNode): IR {.time.} =
    result.kinds[Concrete] = result.calc_kinds(Concrete)
 
 func add_rtti_enum(types: NimNode, ir: IR) {.time.} =
-   types.add(gen_type_def(pub_ident(ir.kind, [!pure]), gen_enum_type(ir.kinds[Concrete])))
+   types.add(nnkTypeDef{pub_ident(ir.kind, [!pure]), nnkEmpty{}, nnkEnumTy{nnkEmpty{}}})
+   for kind in ir.kinds[Concrete]:
+      types[^1][2].add(kind.ident)
 
 func add_inheritance_tree(types: NimNode, ir: IR, inherits: NimNode) {.time.} =
-   var pragmas = seq[NimNode].default
-   var fields = seq[NimNode].default
-   if inherits == nil:
-      pragmas.add [!inheritable, !pure]
-      fields.add nnk_ident_defs{"sys", !NimNode, nnk_empty{}}
-   let name = ir.name.pub_ident(pragmas)
-   let def = gen_object_type(fields, inherits = inherits)
-   types.add(gen_type_def(name, def))
+   let name = ir.name.pub_ident
+   let type_sec =
+      if inherits == nil:
+         when defined(nim_macros2_requires_init) or true:
+            AST:
+               type `name` {.inheritable, pure, requires_init.} = object
+                  detail: NimNode
+         else:
+            AST:
+               type `name` {.inheritable, pure.} = object
+                  detail: NimNode
+      else:
+         AST:
+            type `ir.name.pub_ident` = object of `inherits`
+   types.add(type_sec[0])
    for child_ir in ir:
       types.add_inheritance_tree(child_ir, ir.name.ident)
 
 func gen_range_type(name, kind_name, a, b: string): NimNode {.time.} =
-   result = gen_type_def(name.pub_ident, !range[`kind_name.ident`.`a.ident` ..
-                                                `kind_name.ident`.`b.ident`])
+   result = nnkTypeDef{name.pub_ident, nnkEmpty{}, !range[`kind_name.ident`.`a.ident` ..
+                                                          `kind_name.ident`.`b.ident`]}
 
 func add_rtti_ranges(types: NimNode, ir: IR, base_ir: IR) {.time.} =
    let kinds = ir.kinds[Concrete]
@@ -84,7 +91,7 @@ func add_typeclass(types: NimNode, name: string, kinds: seq[string]) {.time.} =
       var ident_kinds = seq[NimNode].default
       for kind in kinds:
          ident_kinds.add(kind.ident)
-      types.add(gen_type_def(name.pub_ident, ident_kinds.infix_join("|")))
+      types.add(nnkTypeDef{name.pub_ident, nnkEmpty{}, ident_kinds.infix_join("|")})
 
 func add_typeclasses(types: NimNode, ir: IR) {.time.} =
    types.add_typeclass(ir.records_typeclass, ir.kinds[Concrete])
@@ -137,10 +144,10 @@ func add_kind_stmts(stmts: NimNode, ir: IR, base_ir: IR) {.time.} =
    for ir in ir:
       stmts.add_kind_stmts(ir, base_ir)
 
-macro gens*(base, derived) {.time.} =
+macro generate*(base, derived) {.time.} =
    let ir = IR{base, derived}
-   let types = nnk_type_section{}
-   result = nnk_stmt_list{types}
+   let types = nnkTypeSection{}
+   result = nnkStmtList{types}
    types.add_rtti_enum(ir)
    types.add_inheritance_tree(ir, nil)
    for child_ir in ir:
@@ -153,3 +160,40 @@ macro gens*(base, derived) {.time.} =
       proc kind*(self: `ir.name.ident`): `ir.kind.ident`
    for child_ir in ir:
       result.add_kind_stmts(child_ir, ir)
+
+
+template impl_expect*(x, y) {.dirty.} =
+   proc expect*[X: x; Y: y](self: X, _: type[Y]): Y {.time.} =
+      {.push hint[ConvFromXToItSelfNotNeeded]: off.}
+      result = unsafe_default(Y)
+      ## Cast `self` to `T` or error fatally.
+      if self of Y: result = unsafe_conv(self, Y)
+      else:
+         # FIXME: make this nicer
+         when defined(dump_node) and X is Stmt: dbg self
+         fatal("expected variant: '", Y, "', got variant: '", self.kind, '\'')
+      {.pop.}
+
+template impl_field*(T, f, FT, i) {.dirty.} =
+   proc f*(self: T): FT = FT{self.detail[i]}
+   proc `f=`*(self: T, val: FT) = self.detail[i] = val.detail
+
+template impl_items*(T) {.dirty.} =
+   iterator items*(self: T): auto =
+      for i in 0 ..< self.len:
+         yield self[i]
+
+template impl_slice_index*(T, Val) {.dirty.} =
+   proc `[]`*(self: T, i: HSlice): seq[Val] =
+      template idx(x): int =
+         when x is BackwardsIndex: self.len - int(x) else: int(x)
+      for i in idx(i.a) .. idx(i.b):
+         result.add(self[i])
+
+macro impl_container*(Self, Val: untyped, offset: untyped = 0) =
+   result = AST:
+      func len*(self: `Self`): int = self.detail.len - `offset`
+      proc `![]`*(self: `Self`, i: Index): `Val` = `Val`{self.detail[i + `offset`]}
+      proc `![]=`*(self: `Self`, i: Index, val: `Val`) = self.detail[i + `offset`] = val.detail
+      impl_items(`Self`)
+      impl_slice_index(`Self`, `Val`)

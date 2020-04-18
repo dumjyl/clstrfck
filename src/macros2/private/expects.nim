@@ -28,4 +28,4 @@ template impl_expect*(cond, msg, val) =
    {.line.}:
       if not(cond):
          macros.error(expect_string(ast_to_str(cond), msg, val), when val is NimNode: val
-                                                                 else: val.sys)
+                                                                 else: val.detail)
