@@ -27,84 +27,110 @@ dyn macro
 ]#
 
 # FIXME: fields pairs must be rewritten
+# FIXME: introduce a strictInheritance pramga forr nim
+# FIXME: support when stmts
+# FIXME: validate that abstract have at least one record sub
+# FIXME: validate that no fields are shadowed by children.
 
 import
    macros2,
-   macros2/checks,
-   mainframe
+   matchbook/private/parser,
+   std/sequtils
 
-type
-   RecordField = object
-      pub: bool
-      name: Ident
-      pragmas: Pragmas
-      typ: Expr
-   RecordName = object
-      pub: bool
-      name: Ident
-      pragmas: Pragmas # FIXME: impliment
-   # RecordDefKind {.pure.} = enum Object, RefObject, PtrObject
-   RecordDef = object
-      # kind: RecordDefKind
-      is_abstract: bool
-      fields: seq[RecordField]
-      children: seq[Record]
-   Record = ref object
-      name: RecordName
-      def: RecordDef
-   DefKind {.pure.} = enum Record, Other
-   Def = object
-      case kind: DefKind:
-      of DefKind.Record: record: Record
-      of DefKind.Other: expr: Expr
+# type structure
 
-proc `{}`(Self: type[RecordName], expr: Expr): Self =
-   match expr.is_command_call("pub", 1) as call of Some:
-      result = Self(pub: true, name: call.args[0].expect(Ident), pragmas: Pragmas{})
+# A deterministic mangle is used to avoid a little bookkeeping.
+const rand = "_tQ7x3n1pE71aLekQ1xMO"
+
+proc `+`(a: Ident, b: string): Ident = Ident{$a & b}
+
+proc kind_type_name(self: RecordDef): Ident = self.name.ident + "Kind"
+proc union_type_name(self: RecordDef): Ident = self.name.ident + "Union" + rand
+proc impl_type_name(self: RecordDef): Ident = self.name.ident + "Impl" + rand
+
+proc kind_type(self: RecordDef): TypeDef =
+   # Add an enum with a field of the same name for each `record`
+   proc rec(typ: EnumTypeDefBody, def: RecordDef) =
+      if not def.body.is_abstract:
+         typ.add(def.name.ident)
+      for sub in def.body.subs:
+         typ.rec(sub)
+   let typ = EnumTypeDefBody{}
+   typ.rec(self)
+   if typ.len == 0:
+      self.name.ident.error("at least one record is required")
+   result = TypeDef{self.kind_type_name, self.name.pub, Pragmas{[Expr(!pure)]}, typ}
+
+proc zero_sized*(self: RecordDef): bool =
+   # possibly save a byte.
+   if self.body.fields.len > 0:
+      return false
+   for sub in self.body.subs:
+      if not sub.zero_sized:
+         return false
+   result = true
+
+proc gen(self: RecordDef, types: TypeDefs, stmts: StmtList) =
+
+   proc rec_a(self: RecordDef, types: TypeDefs, stmts: StmtList, first = false) {.nim_call.} =
+      # generate the internal type structures.
+      # this is complicated by the fact we want to avoid generating zero sized structs.
+      let impl_def = ObjectTypeDefBody{}
+      for field in self.body.fields:
+         impl_def.add(FieldDef{field.name.ident + rand, field.typ})
+      if not self.body.subs.all(zero_sized):
+         impl_def.add(FieldDef{!union + rand, self.union_type_name})
+         let union_def = ObjectTypeDefBody{}
+         var i = 0
+         for sub in self.body.subs:
+            if not sub.zero_sized:
+               sub.rec_a(types, stmts)
+               union_def.add(FieldDef{!impl + $i + rand, sub.impl_type_name})
+               inc(i)
+         types.add(TypeDef{self.union_type_name, Pragmas{!union}, union_def})
+      types.add(TypeDef{self.impl_type_name, impl_def})
+
+   proc rec_b(
+         self: RecordDef,
+         types: TypeDefs,
+         stmts: StmtList,
+         parent: Option[RecordDef]) {.nim_call.} =
+      let def = ObjectTypeDefBody{parent.map(x => x.name.ident.AnyIdent)}
+      let pragmas = Pragmas{}
+      let kind_field_name = Ident{"kind"} + rand
+      if parent of None:
+         pragmas.add([Expr(!inheritable), !pure, !requires_init])
+         def.add(FieldDef{kind_field_name, self.kind_type_name})
+         def.add(FieldDef{!impl + rand, self.impl_type_name})
+      types.add(TypeDef{self.name.ident, pragmas, def})
+      stmts.add_AST:
+         func kind*(self: `self.name.ident`): `self.kind_type_name` =
+            result = `self.kind_type_name`(self.`kind_field_name`)
+      for sub in self.body.subs:
+         sub.rec_b(types, stmts, self.some)
+
+   if self.is_simple:
+      let obj_def = ObjectTypeDefBody{}
+      for field in self.body.fields:
+         obj_def.add(FieldDef{field.name.ident, field.name.pub, field.typ})
+      types.add(TypeDef{self.name.ident, self.name.pub, self.name.pragmas, obj_def})
    else:
-      result = Self(pub: false, name: expr.expect(Ident), pragmas: Pragmas{})
+      types.add(self.kind_type)
+      self.rec_a(types, stmts, first = true)
+      self.rec_b(types, stmts, RecordDef.none)
 
-proc is_record_kw(expr: Expr): bool =
-   match expr of Ident and (expr == "record" or expr == "abstract"): result = true
+proc gen(self: OtherDef, types: TypeDefs, stmts: StmtList) =
+   # FIXME: pragmas
+   types.add(TypeDef{self.name.ident, self.name.pub, self.body})
 
-proc is_record_def(expr: Expr): bool =
-   match expr of Call and expr.args.len == 1 and expr.args[0] of StmtList:
-      match expr.is_record_kw: result = true
-      elif expr of ObjectConstr: result = expr.name.is_record_kw
-
-proc `{}`(Self: type[RecordDef], expr: Expr): Self =
-   match expr.is_call(["record", "abstract"], 1) as call of Some and call.args[0] of StmtList:
-      result = Self(is_abstract: call.name.expect(Ident) == "abstract")
-   else:
-      dbg expr
-      expr.error("FIXME")
-
-proc `{}`(Self: type[Record], type_def: Asgn): Self =
-   result = Self(name: RecordName{type_def.lhs}, def: RecordDef{type_def.rhs})
-
-proc gen(self: Record): Stmt =
-   result = StmtList{}
-
-proc `{}`(Self: type[DefKind], type_def: Asgn): Self =
-   if type_def.rhs.is_record_def: result = Self.Record
-   else: result = Self.Other
-
-proc `{}`(Self: type[Def], type_def: Asgn): Self =
-   case DefKind{type_def}:
-   of DefKind.Record: result = Self(kind: DefKind.Record, record: Record{type_def})
-   of DefKind.Other: result = Self(kind: DefKind.Other, expr: Ident{"PLACEHOLDER"})
-
-proc gen(defs: seq[Def]): StmtList =
-   result = StmtList{}
-   for def in defs:
-      case def.kind:
-      of DefKind.Record: discard def.record.gen
-      of DefKind.Other: fatal("FIXME")
-
-macro typedef*(type_defs: {StmtList}) {.m2.} =
-   ## If the toplevel type name is exported with `pub` all derived object are public.
-   ## The same rule applies for `ref` and `ptr` annotations.
+macro typedef*(type_defs: {StmtList}): {StmtList} {.m2.} =
    var defs = seq[Def].default
    for type_def in type_defs:
       defs.add(Def{type_def.expect(Asgn)})
-   result = defs.gen
+   let types = TypeDefs{}
+   result = StmtList{types}
+   for def in defs:
+      case def.kind:
+      of DefKind.Record: def.record.gen(types, result)
+      of DefKind.Other: def.other.gen(types, result)
+   echo result

@@ -1,177 +1,177 @@
 import
    mainframe,
-   core,
    lca_data,
-   vm_timings
+   core
 
 type
-   KindsFilter = enum All, Concrete
+   MetaKind* {.pure.} = enum
+      All
+      Sub
+      Record
+      # Base
+      # RecordBase
    IR = ref object
       name: string
-      kinds: array[KindsFilter, seq[string]]
-      children: seq[IR]
-
-# typeclass that contains all types with an associated kind
-template records_typeclass(ir: IR): string = ir.name & "RecordsMeta"
-
-# typeclass that contains all types that are children of a type
-template children_typeclass(ir: IR): string = ir.name & "ChildrenMeta"
-
-# like children_typeclass but includes itself too
-template all_typeclass(ir: IR): string = ir.name & "AllMeta"
+      kinds: array[MetaKind, seq[string]]
+      subs: seq[IR]
 
 template kind(ir: IR): string = ir.name & "Kind"
 
 iterator items(ir: IR): IR =
-   for ir in ir.children:
-      yield ir
+   for ir in ir.subs: yield ir
 
-func `{}`(Self: type[IR], n: NimNode): IR {.time.} =
-   result = IR()
+func `{}`(Self: type[IR], n: NimNode): IR =
    if n of nnkIdent:
-      result.name = $n
+      result = IR(name: $n)
+      result.kinds[All].add(result.name)
+      result.kinds[Record].add(result.name)
    elif n of nnkCall and n.len == 2 and n[1] of nnkStmtList:
-      result.name = $n[0]
+      result = IR(name: $n[0])
+      result.kinds[All].add(result.name)
       for stmt in n[1]:
-         result.children.add(IR{stmt})
-   else: n.error("failed to parse 'gens' declaration")
+         result.subs.add(IR{stmt})
+         result.kinds[All].add(result.subs[^1].kinds[All])
+         result.kinds[Sub].add(result.subs[^1].kinds[All])
+         result.kinds[Record].add(result.subs[^1].kinds[Record])
+   else: n.error("failed to parse 'generate' declaration")
 
-func calc_kinds(ir: IR, filter: KindsFilter): seq[string] {.time.} =
-   if ir.children.len == 0 or filter == All:
-      result = @[ir.name]
-      ir.kinds[filter].add(result)
-   for ir in ir:
-      let kinds = ir.calc_kinds(filter)
-      result.add(kinds)
-      ir.kinds[filter].add(kinds)
-
-func `{}`(Self: type[IR], base, derived: NimNode): IR {.time.} =
-   result = IR(name: $base)
-   for derived in derived:
-      result.children.add(IR{derived})
-   result.kinds[All] = result.calc_kinds(All)
-   result.kinds[Concrete] = result.calc_kinds(Concrete)
-
-func add_rtti_enum(types: NimNode, ir: IR) {.time.} =
+func add_kind_enum(types: NimNode, ir: IR) =
    types.add(nnkTypeDef{pub_ident(ir.kind, [!pure]), nnkEmpty{}, nnkEnumTy{nnkEmpty{}}})
-   for kind in ir.kinds[Concrete]:
+   for kind in ir.kinds[Record]:
       types[^1][2].add(kind.ident)
 
-func add_inheritance_tree(types: NimNode, ir: IR, inherits: NimNode) {.time.} =
+func add_inheritance_tree(types: NimNode, ir: IR, inherits: NimNode) =
    let name = ir.name.pub_ident
    let type_sec =
       if inherits == nil:
-         when defined(nim_macros2_requires_init) or true:
-            AST:
-               type `name` {.inheritable, pure, requires_init.} = object
-                  detail: NimNode
-         else:
-            AST:
-               type `name` {.inheritable, pure.} = object
-                  detail: NimNode
+         AST:
+            type `name` {.inheritable, pure, requires_init.} = object
+               detail: NimNode
       else:
          AST:
             type `ir.name.pub_ident` = object of `inherits`
    types.add(type_sec[0])
-   for child_ir in ir:
-      types.add_inheritance_tree(child_ir, ir.name.ident)
+   for sub_ir in ir:
+      types.add_inheritance_tree(sub_ir, ir.name.ident)
 
-func gen_range_type(name, kind_name, a, b: string): NimNode {.time.} =
+func range_type(name, kind_name, a, b: string): NimNode =
    result = nnkTypeDef{name.pub_ident, nnkEmpty{}, !range[`kind_name.ident`.`a.ident` ..
                                                           `kind_name.ident`.`b.ident`]}
 
-func add_rtti_ranges(types: NimNode, ir: IR, base_ir: IR) {.time.} =
-   let kinds = ir.kinds[Concrete]
-   types.add(gen_range_type(ir.kind, base_ir.kind, kinds[0], kinds[^1]))
+func add_kind_subranges(types: NimNode, ir: IR, base_ir: IR) =
+   let kinds = ir.kinds[Record]
+   types.add(range_type(ir.kind, base_ir.kind, kinds[0], kinds[^1]))
    for ir in ir:
-      types.add_rtti_ranges(ir, base_ir)
+      types.add_kind_subranges(ir, base_ir)
 
-func add_typeclass(types: NimNode, name: string, kinds: seq[string]) {.time.} =
-   if kinds.len > 0:
-      var ident_kinds = seq[NimNode].default
-      for kind in kinds:
-         ident_kinds.add(kind.ident)
-      types.add(nnkTypeDef{name.pub_ident, nnkEmpty{}, ident_kinds.infix_join("|")})
-
-func add_typeclasses(types: NimNode, ir: IR) {.time.} =
-   types.add_typeclass(ir.records_typeclass, ir.kinds[Concrete])
-   types.add_typeclass(ir.children_typeclass, ir.kinds[All][1 .. ^1])
-   types.add_typeclass(ir.all_typeclass, ir.kinds[All])
-   for ir in ir:
-      types.add_typeclasses(ir)
-
-func add_rtti_range_stmts(stmts: NimNode, ir: IR, base_ir: IR) {.time.} =
-   let kinds = ir.kinds[Concrete]
-   let kind_name = base_ir.kind.ident
-   stmts.add_AST:
-      func rtti_range*(T: type[`ir.name.ident`]): set[`kind_name`] =
-         result = {`kind_name`.`kinds[0].ident` .. `kind_name`.`kinds[^1].ident`}
-   for ir in ir:
-      stmts.add_rtti_range_stmts(ir, base_ir)
-
-proc unsafe_downconv(ir: IR, base_ir: IR): NimNode {.time.} =
-   proc `{}`(Self: type[LCAData], ir: IR, base_ir: IR): Self {.time.} =
-      var children = seq[Self].default
+proc solve_lca(ir: IR, base_ir: IR): NimNode =
+   proc rec(ir: IR, base_ir: IR): LCAData =
+      var subs = seq[LCAData].default
       var kinds = set[LCAKind].default
-      for child_ir in ir:
-         children.add(LCAData{child_ir, base_ir})
-         kinds.incl(children[^1].kinds)
-      if ir.children.len == 0:
+      for sub_ir in ir:
+         subs.add(rec(sub_ir, base_ir))
+         kinds.incl(subs[^1].kinds)
+      if ir.subs.len == 0:
          block found_kind:
-            for i, kind in base_ir.kinds[Concrete]:
+            for i, kind in base_ir.kinds[Record]:
                if kind == ir.name:
                   kinds.incl(i.LCAKind)
                   break found_kind
             fatal "failed to lookup kind"
-      result = LCAData{ir.name, kinds, children}
-   let data = LCAData{ir, base_ir}.lit
+      result = LCAData{ir.name, kinds, subs}
+   let data = rec(ir, base_ir).lit
+   let data_sym = nskLet.gen
    result = AST:
-      import macros2/private/lca_data
-      {.push hint[ConvFromXtoItselfNotNeeded]: off.}
-      func `!{}`*(Self: type[LCAData], _: type[`base_ir.name.ident`]): Self = `data`
+      let `data_sym` {.compile_time.} = `data`
+      macro solve_lca(
+            Self: type[`base_ir.name.ident`],
+            kinds: static[set[`base_ir.kind.ident`]]
+            ): auto =
+         result = `bind solve`(`data_sym`, kinds)
 
-func add_of_stmts(stmts: NimNode, ir: IR, base_ir: IR) {.time.} =
-   stmts.add_AST:
-      proc `!of`*(self: `base_ir.name.ident`, Self: type[`ir.name.ident`]): bool =
-         result = self.kind.ord in `ir.kind.ident`.low.ord .. `ir.kind.ident`.high.ord
-   for ir in ir:
-      stmts.add_of_stmts(ir, base_ir)
+      # FIXME(nim): when kinds is static, we get the nkRange crash
+      template unsafe_lca_subconv(
+            self: `base_ir.name.ident`,
+            kinds: set[`base_ir.kind.ident`]
+            ): auto =
+         unsafe_conv(self, solve_lca(`base_ir.name.ident`, kinds))
 
-func add_kind_stmts(stmts: NimNode, ir: IR, base_ir: IR) {.time.} =
-   stmts.add_AST:
-      proc kind(self: `ir.name.ident`): `ir.kind.ident` =
-         result = `ir.kind.ident`(`base_ir.name.ident`(self).kind)
-   for ir in ir:
-      stmts.add_kind_stmts(ir, base_ir)
+proc visit*(ir: IR, fn: proc (ir: IR, base_ir: IR): NimNode): NimNode =
+   proc rec(stmts: NimNode, ir: IR, base_ir: IR, fn: auto) =
+      stmts.add(fn(ir, base_ir))
+      for ir in ir:
+         stmts.rec(ir, base_ir, fn)
+   result = nnkStmtList{}
+   result.rec(ir, ir, fn)
 
-macro generate*(base, derived) {.time.} =
-   let ir = IR{base, derived}
+proc gen_meta(ir: IR, base_ir: IR): NimNode =
+   func typeclass(kinds: seq[string]): NimNode =
+      if kinds.len > 0:
+         result = kinds[0].ident
+         for i in 1 ..< kinds.len:
+            result = !typedesc(`result` | `kinds[i].ident`)
+      else:
+         result = AST: {.fatal: "empty meta typeclass: " & $Self & "; " & $kind .}
+   let all = typeclass(ir.kinds[All])
+   let sub = typeclass(ir.kinds[Sub])
+   let record = typeclass(ir.kinds[Record])
+   result = AST:
+      template meta*(Self: type[`ir.name.ident`], kind: static[MetaKind]): auto =
+         when kind == All: `all`
+         elif kind == Sub: `sub`
+         elif kind == Record: `record`
+         else: {.fatal: "unrecognized kind: " & $kind.}
+
+proc gen_kind(ir: IR, base_ir: IR): NimNode =
+   result = AST:
+      proc kind*(self: `ir.name.ident`): `ir.kind.ident` =
+         result = `ir.kind.ident`(`base_ir.kind.ident`{self.detail})
+
+proc gen_kinds_of(ir: IR, base_ir: IR): NimNode =
+   let kinds = ir.kinds[Record]
+   let kind_name = base_ir.kind.ident
+   result = AST:
+      # FIXME(nim): this has an nkRange node without a type which is invalid.
+      #proc kinds_of*(Self: type[`ir.name.ident`]): set[`kind_name`] =
+      #   result = {`kind_name`.`kinds[0].ident` .. `kind_name`.`kinds[^1].ident`}
+
+      proc kinds_of*(Self: type[`ir.name.ident`]): set[`kind_name`] =
+         result = {`kind_name`.`kinds[0].ident` .. `kind_name`.`kinds[^1].ident`}
+
+macro generate*(base, derived) =
+   let ir = IR{nnkCall{base, derived}}
    let types = nnkTypeSection{}
    result = nnkStmtList{types}
-   types.add_rtti_enum(ir)
+   types.add_kind_enum(ir)
    types.add_inheritance_tree(ir, nil)
-   for child_ir in ir:
-      types.add_rtti_ranges(child_ir, ir)
-   types.add_typeclasses(ir)
-   result.add_rtti_range_stmts(ir, ir)
-   result.add(unsafe_downconv(ir, ir))
-   result.add_of_stmts(ir, ir)
-   result.add_AST:
-      proc kind*(self: `ir.name.ident`): `ir.kind.ident`
-   for child_ir in ir:
-      result.add_kind_stmts(child_ir, ir)
+   for subs_ir in ir:
+      types.add_kind_subranges(subs_ir, ir)
+   result.add(solve_lca(ir, ir))
 
+   result.add(ir.visit(gen_meta))
+   if base.eq_ident("Stmt"):
+      result.add_AST:
+         func `!{}`*(Self: type[`ir.kind.ident`], node: NimNode): Self
+      result.add(ir.visit(gen_kind))
+   result.add(ir.visit(gen_kinds_of))
+   result.add_AST:
+      proc `!of`*(self: meta(`ir.name.ident`, All), T: type[meta(`ir.name.ident`, All)]): bool =
+         self.kind in kinds_of(T)
+   #if base.eq_ident("Stmt"): dump result
 
 template impl_expect*(x, y) {.dirty.} =
-   proc expect*[X: x; Y: y](self: X, _: type[Y]): Y {.time.} =
+   proc expect*[X: x; Y: y](self: X, _: type[Y]): Y =
       {.push hint[ConvFromXToItSelfNotNeeded]: off.}
+      {.push hint[CondTrue]: off.}
       result = unsafe_default(Y)
       ## Cast `self` to `T` or error fatally.
-      if self of Y: result = unsafe_conv(self, Y)
+      if self of Y:
+         result = unsafe_conv(self, Y)
       else:
          # FIXME: make this nicer
          when defined(dump_node) and X is Stmt: dbg self
          fatal("expected variant: '", Y, "', got variant: '", self.kind, '\'')
+      {.pop.}
       {.pop.}
 
 template impl_field*(T, f, FT, i) {.dirty.} =

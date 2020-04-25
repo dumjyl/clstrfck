@@ -107,8 +107,7 @@ proc dbg_repr*(self: Stmt): string =
          for arg in self.args:
             << arg.dbg_repr
    of NilLit: discard
-   of NumericLit:
-      << ["{", $self, "}"]
+   of NumericLit: << ["{", $self, "}"]
    of ...[Asgn, Dot]:
       list:
          << self.lhs.dbg_repr
@@ -134,4 +133,5 @@ proc dbg_repr*(self: Stmt): string =
       dump self.detail
       fatal("FIXME: dbg_repr{", self.kind, "}")
 
-proc dbg*(self: Stmt | Colon | IdentDef | ForLoopVars | AnyVarDef) = debug_echo self.dbg_repr
+proc dbg*(self: Stmt | MaybeColon | IdentDef | ForLoopVars | Pragmas | AnyVarDef) =
+   debug_echo self.dbg_repr

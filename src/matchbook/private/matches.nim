@@ -5,9 +5,11 @@
 # FIXME: a symbol can expand into something else...
 # FIXME: `match` does not work as an expression.
 # FIXME: better downcasting support for the else branch
+# FIXME: when upconverting a mutable a Base(default(var Foo))
+# FIXME: handling types that require qualification.
 
 import utils; export utils
-import macros2/private/[vm_timings, core, vm_state]
+import macros2/private/core
 
 type
    MatchKind = enum IfLike, CaseLike
@@ -21,13 +23,13 @@ type
       expr: NimNode   #              ^^^^^^^^^^^^^
       has_unpack_args: bool
       unpack_args: seq[NimNode]
+
 const
    if_branch_kinds = nnkStmtListLike + nnkElifLike + nnkElseLike
    case_branch_kinds = {nnkOfBranch} + nnkElifLike + nnkElseLike
    all_branch_kinds = if_branch_kinds + case_branch_kinds
 
-proc classify_branches(branches: NimNode): MatchKind {.time.} =
-
+proc classify_branches(branches: NimNode): MatchKind =
    var branch_kinds = default NimNodeKinds
    branches.expect_min(1)
    for branch in branches:
@@ -38,21 +40,22 @@ proc classify_branches(branches: NimNode): MatchKind {.time.} =
    else: branches.error("branch kinds must belong exclusively to one of these sets: " &
                         $if_branch_kinds & ", " & $case_branch_kinds)
 
-proc classify_expr(expr: NimNode): MatchKind {.time.} =
+proc classify_expr(expr: NimNode): MatchKind =
    # FIXME: this is shit
    result = if expr.is_infix("of"): IfLike else: CaseLike
 
-proc `{}`(Self: type[MatchKind], expr: NimNode, branches: NimNode): MatchKind {.time.} =
+proc `{}`(Self: type[MatchKind], expr: NimNode, branches: NimNode): MatchKind =
    # match is overloaded as to be both if-like control flow and case-like,
    # determine which or error.
    let expr_kind = classify_expr(expr)
    let branches_kind = classify_branches(branches)
-   if expr_kind == branches_kind: return expr_kind
+   if expr_kind == branches_kind:
+      return expr_kind
    case expr_kind:
    of IfLike: branches.error("invalid branch kinds")
    of CaseLike: result = IfLike
 
-func `{}`(Self: type[OfExpr], expr: NimNode): Self {.time.} =
+func `{}`(Self: type[OfExpr], expr: NimNode): Self =
    case expr.kind:
    of nnkIdent: result = Self(expr: expr, ident: expr, kind: OfExprKind.Ident)
    of nnkIdentLike - {nnkIdent}: result = Self(expr: expr, ident: expr, kind: OfExprKind.Sym)
@@ -69,25 +72,25 @@ func `{}`(Self: type[OfExpr], expr: NimNode): Self {.time.} =
       result = Self(expr: expr[1], ident: expr[2], kind: AsExpr)
    else: result = Self(expr: expr, kind: ComplexExpr)
 
-func `{}`(Self: type[OfVariant], variant: NimNode, is_expr = false): Self {.time.} =
+func `{}`(Self: type[OfVariant], variant: NimNode, is_expr = false): Self =
    case variant.kind:
    of nnkInfix:
       result.expr = variant
       result.expr[1] = Self{result.expr[1], true}.expr
       result.expr[2] = Self{result.expr[2], true}.expr
    of nnkCall:
-      result.expr = !rtti_range(`variant[0]`)
+      result.expr = !kinds_of(`variant[0]`)
       result.has_unpack_args = true
       for i in 1 ..< variant.len:
          result.unpack_args.add(ident($variant[i])) # FIXME: more unpack arg validation
-   of nnkIdentLike: result.expr = !rtti_range(`variant`)
+   of nnkIdentLike: result.expr = !kinds_of(`variant`)
    else: variant.error("failed to parse `OfVariant`")
 
 proc process_elif_expr(
       expr: OfExpr,
       variant: OfVariant,
       new_idents: var seq[string]
-      ): NimNode {.time.} =
+      ): NimNode =
    assert(not variant.has_unpack_args, "FIXME: elif unpack args")
    let tmp = nskLet.gen
    result = nnkStmtList{}
@@ -96,12 +99,12 @@ proc process_elif_expr(
    if expr.kind != OfExprKind.ComplexExpr:
       new_idents.add($expr.ident)
       result.add_AST:
-         template `expr.ident`: auto {.used.} = unsafe_downconv(`tmp`, [`variant.expr`])
+         template `expr.ident`: auto {.used.} = unsafe_subconv(`tmp`, `variant.expr`)
    else:
       discard # expr.expr.error("FIXME: ComplexExpr")
-   result.add(!(`tmp`.kind in `variant.expr`))
+   result.add(!(kind(`tmp`) in `variant.expr`))
 
-proc visit_elif_expr(expr: NimNode, new_idents: var seq[string]): NimNode {.time.} =
+proc visit_elif_expr(expr: NimNode, new_idents: var seq[string]): NimNode =
    # We don't want the user to be able to access any unitialized objects, so
    # downcasts must be proven safe through short circuit evaluation
    result = expr
@@ -121,7 +124,7 @@ proc process_if_branch(branch: NimNode): NimNode =
       var new_idents = seq[string].default
       branch[0] = branch[0].visit_elif_expr(new_idents)
 
-proc if_match(expr: NimNode, branches: NimNode): NimNode {.time.} =
+proc if_match(expr: NimNode, branches: NimNode): NimNode =
    # simple rewrite to if statement.
    branches[0].expect(nnkStmtListLike)
    branches[0] = nnkElifBranch{expr, branches[0]}
@@ -148,13 +151,12 @@ proc todo_unpack_args(variants: seq[OfVariant]) =
          if variant.has_unpack_args:
             error("FIXME: multiple expression unpacking")
 
-proc case_match(expr: OfExpr, branches: NimNode): NimNode {.time.} =
+proc case_match(expr: OfExpr, branches: NimNode): NimNode =
    let kind_expr = !kind(`expr.expr`)
    let expr_ident = ident($expr.ident)
    let tmp = nskLet.gen
-
-
    let case_stmt = nnkCaseStmt{kind_expr}
+   var else_kinds = NimNode(nil)
    for branch in branches:
       case branch.kind:
       of nnkOfBranch:
@@ -166,25 +168,33 @@ proc case_match(expr: OfExpr, branches: NimNode): NimNode {.time.} =
             branch.set_len(variants.len + 1)
             branch[^1] = body
 
-            let covers_exprs = ![]
+            var kinds = NimNode(nil)
             for i in 0 ..< variants.len:
                branch[i] = variants[i].expr
-               covers_exprs.add(branch[i].copy)
+               kinds = if kinds == nil: branch[i]
+                       else: !system.`!+`(`kinds`, `branch[i]`)
+               else_kinds = if else_kinds == nil: branch[i]
+                            else: !system.`!+`(`else_kinds`, `branch[i]`)
             if expr.kind != OfExprKind.ComplexExpr:
                branch[^1].insert(0, AST do:
-                  template `expr.ident`: auto {.used.} = unsafe_downconv(`tmp`, `covers_exprs`))
+                  template `expr.ident`: auto {.used.} = unsafe_subconv(`tmp`, `kinds`))
             variants.todo_unpack_args
             if variants.len == 1 and variants[0].has_unpack_args:
                let call = !unpack(`expr_ident`)
                for unpack_arg in variants[0].unpack_args:
                   call.add(unpack_arg)
                branch[^1].insert(1, call)
+      of nnkElse:
+         if expr.kind != OfExprKind.ComplexExpr:
+            branch[0].insert(0, AST do:
+               template `expr.ident`: auto {.used.} = unsafe_subconv(`tmp`, `else_kinds`))
+         case_stmt.add(branch)
       else: case_stmt.add(process_if_branch(branch))
    result = AST:
       let `tmp` = `expr.expr`
       `case_stmt`
 
-macro match*(self: untyped, branches: varargs[untyped]): untyped {.time.} =
+macro match*(self: untyped, branches: varargs[untyped]): untyped =
    ## Control flow for working with polymorhpic types.
    let branches = if branches of all_branch_kinds: nnkArgList{branches} else: branches
    case MatchKind{self, branches}:

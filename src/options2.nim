@@ -4,8 +4,8 @@ import
 from sugar import `=>`
 export matches, `=>`
 
-# FIXME: consider a wrapopt like std/wrapnil
-# FIXME: this should be replaced by a more a more specialized option type generator.
+# FIXME: consider alternatives: a wrapopt module like std/wrapnil
+#                               a more a more specialized option type generator that maintains invariants.
 
 {.push warnings: off.}
 
@@ -39,36 +39,35 @@ proc kind*[T](self: Option[T]): OptionKind =
    else:
       result = self.kind
 
-proc `of`*[T](self: Option[T], Variant: type[Some]): bool = self.kind == OptionKind.Some
-proc `of`*[T](self: Option[T], Variant: type[None]): bool = self.kind == OptionKind.None
+# FIXME(nim): weirdness when kind(self) -> self.kind for the vm ref optimization.
+#             the vm accesses the undeclared field because of local module ufcs precedence
+proc `of`*[T](self: Option[T], Variant: type[Some]): bool = kind(self) == OptionKind.Some
+proc `of`*[T](self: Option[T], Variant: type[None]): bool = kind(self) == OptionKind.None
 
 proc some*[T](val: T): Option[T] =
    when T is DefaultIsNone and T is_not NimNode:
       assert(val != default(T))
       result = Some[T](val: val)
-   else:
-      result = Some[T](val: val, kind: OptionKind.Some)
+   else: result = Some[T](val: val, kind: OptionKind.Some)
 
 proc none*[T](_: type[T]): Option[T] =
-   when T is DefaultIsNone and T is_not NimNode:
-      assert(val == default(T))
-      result = None[T]()
-   else:
-      result = None[T](val: unsafe_default(T), kind: OptionKind.None)
+   when T is DefaultIsNone and T is_not NimNode: result = None[T]()
+   else: result = None[T](val: unsafe_default(T), kind: OptionKind.None)
 
 const
    option_kinds = {OptionKind.None, OptionKind.Some}
    some_kinds = {OptionKind.Some}
    none_kinds = {OptionKind.None}
 
-proc rtti_range*(Self: type[Option]): set[OptionKind] = option_kinds
-proc rtti_range*(Self: type[Some]): set[OptionKind] = some_kinds
-proc rtti_range*(Self: type[None]): set[OptionKind] = none_kinds
+proc kinds_of*(Self: type[Option]): set[OptionKind] = option_kinds
+proc kinds_of*(Self: type[Some]): set[OptionKind] = some_kinds
+proc kinds_of*(Self: type[None]): set[OptionKind] = none_kinds
 
-template unsafe_downconv*[T](self: Option[T], kinds: static[openarray[set[OptionKind]]]): auto =
-   when kinds == [option_kinds]: self
-   elif kinds == [some_kinds]: self.val
-   elif kinds == [none_kinds]: unsafe_conv(self, None[T])
+template unsafe_subconv*[T](self: Option[T], kinds: set[OptionKind]): auto =
+   # FIXME: bad checks
+   when kinds == option_kinds: self
+   elif kinds == some_kinds: self.val
+   elif kinds == none_kinds: unsafe_conv(self, None[T])
    else: {.fatal: "unreachable".}
 
 proc `$`*[T](self: Option[T]): string =
@@ -76,8 +75,7 @@ proc `$`*[T](self: Option[T]): string =
       result = "Some("
       result.add_quoted(self)
       result.add(")")
-   else:
-      result = "None(" & $T & ")"
+   else: result = "None(" & $T & ")"
 
 template `$`*[T](self: Some[T] | None[T]): string = $unsafe_object_cast(self, Option[T])
 

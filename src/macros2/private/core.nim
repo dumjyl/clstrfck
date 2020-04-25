@@ -7,7 +7,7 @@ from std/macros import
    NimTypeKind, type_kind, get_type, get_type_inst, get_type_impl,
    `==`, `[]`, `[]=`, len, copy, insert, items,
    eq_ident, error, params, `params=`, body, `body=`, name, nnkCallKinds,
-   line_info, line_info_obj, tree_repr, get_ast,
+   line_info, line_info_obj, tree_repr, get_ast, is_exported,
    # private
    str_val
 {.push warnings: off.}
@@ -17,7 +17,7 @@ export
    NimTypeKind, type_kind, get_type, get_type_inst, get_type_impl,
    `==`, `[]`, `[]=`, len, copy, insert, items,
    eq_ident, error, params, `params=`, body, `body=`, name, nnkCallKinds,
-   line_info, line_info_obj, tree_repr, get_ast
+   line_info, line_info_obj, tree_repr, get_ast, is_exported
 {.pop.}
 
 type
@@ -33,7 +33,18 @@ const
    routine_reserved_pos* = 5
    routine_body_pos* = 6
 
+   formals_return_type_pos* = 0
+
+   object_def_pragmas_pos* = 0
+   object_def_inherit_pos* = 1
+   object_def_fields_pos* = 2
+
+   call_like_name_pos* = 0
+
+   postfix_ident_pos* = 1
+
 const
+   nnkRoutines* = macros.RoutineNodes
    nnkIdentLike* = {nnkIdent, nnkSym, nnkOpenSymChoice, nnkClosedSymChoice}
    nnkStmtListLike* = {nnkStmtList, nnkStmtListExpr, nnkStmtListType}
    nnkBlockLike* = {nnkBlockStmt, nnkBlockExpr, nnkBlockType}
@@ -48,8 +59,7 @@ func stmt_dbg(n: NimNode): string = "Stmt repr: " & expects.enclose(repr(n))
 func tree_dbg(n: NimNode): string = "Tree repr: " & expects.enclose(macros.tree_repr(n))
 
 template dump*(n: NimNode) =
-   debug_echo("Dump '", ast_to_str(n), "':\n",
-              indent(tree_dbg(n) & '\n' & stmt_dbg(n), 2))
+   debug_echo("Dump '", ast_to_str(n), "':\n", indent(tree_dbg(n) & '\n' & stmt_dbg(n), 2))
 
 func verbose_note*(n: NimNode): string = # FIXME: mixin not working, should be private
    when defined(dump_node):
@@ -115,23 +125,22 @@ func ident*(
       backtick = false
       ): NimNode =
    result = macros.ident(name)
-   if backtick: result = nnkAccQuoted{result}
-   if public: result = nnkPostfix{"*", result}
-   if pragmas.len > 0: result = nnkPragmaExpr{result, nnkPragma{pragmas}}
+   if backtick:
+      result = nnkAccQuoted{result}
+   if public:
+      result = nnkPostfix{"*", result}
+   if pragmas.len > 0:
+      result = nnkPragmaExpr{result, nnkPragma{pragmas}}
 
-func pub_ident*(
-      name: string,
-      pragmas: openarray[NimNode] = [],
-      backtick = false
-      ): NimNode =
+func pub_ident*(name: string, pragmas: openarray[NimNode] = [], backtick = false): NimNode =
    result = ident(name, true, pragmas, backtick)
 
-func rtti_range*(self: NimNodeKind): set[NimNodeKind] = {self}
-func rtti_range*(self: NimTypeKind): set[NimTypeKind] = {self}
-func rtti_range*(self: NimSymKind): set[NimSymKind] = {self}
-func rtti_range*(self: set[NimNodeKind]): set[NimNodeKind] = self
-func rtti_range*(self: set[NimTypeKind]): set[NimTypeKind] = self
-func rtti_range*(self: set[NimSymKind]): set[NimSymKind] = self
+func kinds_of*(self: NimNodeKind): set[NimNodeKind] = {self}
+func kinds_of*(self: NimTypeKind): set[NimTypeKind] = {self}
+func kinds_of*(self: NimSymKind): set[NimSymKind] = {self}
+func kinds_of*(self: set[NimNodeKind]): set[NimNodeKind] = self
+func kinds_of*(self: set[NimTypeKind]): set[NimTypeKind] = self
+func kinds_of*(self: set[NimSymKind]): set[NimSymKind] = self
 func `of`*(self: NimNodeKind, kind: NimNodeKind): bool = self == kind
 func `of`*(self: NimNodeKind, kinds: NimNodeKinds): bool = self in kinds
 func `of`*(self: NimTypeKind, kind: NimTypeKind): bool = self == kind
@@ -173,6 +182,7 @@ proc replace*[T](
          self[i] = replace(self[i], ctx, fn)
 
 proc bind_ident*(val: static[string]): NimNode {.compile_time.} =
+   # FIXME: any way to fix the shit lineinfo?
    result = macros.bind_sym(val) # workaround weird bindsym rule.
 
 proc compound_ident(n: NimNode, sub_i = 0): string =
@@ -213,8 +223,10 @@ proc internal_quote(stmts: NimNode, dirty: bool): NimNode =
             else:
                let expr_str = self.compound_ident
                var expr = NimNode(nil)
-               try: expr = macros.parse_expr(expr_str)
-               except ValueError: self.error("failed to parse 'AST' expr")
+               try:
+                  expr = macros.parse_expr(expr_str)
+               except ValueError:
+                  self.error("failed to parse 'AST' expr")
                result = expr_str.mangle
                if result notin ctx.params:
                   ctx.args.add(expr)
@@ -246,4 +258,4 @@ template add_AST*(self, stmts) =
    ## Append `stmts` to `self` using `add`.
    self.add(AST(stmts))
 
-func unsafe_downconv*(self: NimNode, _: openarray[set[NimNodeKind]]): NimNode = self
+func unsafe_subconv*(self: NimNode, _: set[NimNodeKind]): NimNode = self

@@ -1,3 +1,5 @@
+# FIXME: this is really slow for the vm, also dump in macros2/private/core.nim
+
 from std/strutils import split, join, indent
 from macros import nil
 
@@ -11,7 +13,7 @@ func strip_ends(str: string): string =
 
 func enclose*(str: string): string =
    result = str.strip_ends
-   if result.split("\n").len > 1:
+   if '\n' in result:
       result = "'''\n" & result.indent(2) & "\n'''"
    else:
       result = '\'' & result & '\''

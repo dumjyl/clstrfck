@@ -7,7 +7,25 @@ template test(name, stmts) =
       static:
          stmts
 
-test tfor_loop:
+test StmtList:
+   let stmts = StmtList{!(a + b), !"abc"}
+   stmts.add_AST:
+      blah
+      stuff
+   stmts.add([!1, !2, !3])
+   assert(stmts.len == 7)
+   assert(stmts[2].expect(Ident) == "blah")
+   assert($stmts == """
+
+a + b
+"abc"
+blah
+stuff
+1
+2
+3""")
+
+test ForLoop:
    let ast = AST:
       for a, (b, c) in @[(2, 3), (4, 5), (6, 7)]:
          echo(a * b + c)
@@ -16,8 +34,8 @@ test tfor_loop:
    discard for_loop.expr.expect(PrefixCall)
    assert(for_loop.body.expect(StmtList).expect(1) == !echo(a * b + c))
 
-when defined(vm_timings):
-   static: log_timings()
-
-test tident:
-   dbg "abc".ident
+test Ident:
+   let x = Ident{"aBC"}
+   let y = !abc
+   assert(x == y)
+   assert(x == "abc")

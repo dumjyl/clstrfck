@@ -15,25 +15,30 @@ proc internal_quote(stmts: Stmt, gensym: bool): StmtList =
 
    proc add(self: VisitCtx, expr: Expr): Ident =
       self.args.add(Ident{"into_ast"}.call(expr))
-      self.params.add(Ident{nskVar.gen.`$` & "_c8bd78kl46hqm9wpf0wnso8n0"}) # :-/
+      # somewhat hacky, gensyming template params does not work because of a template implimentation detail
+      self.params.add(Ident{nskVar.gen.`$` & "_c8bd78kl46hqm9wpf0wnso8n0"})
       result = self.params[^1]
 
    proc visitor(self: CompoundIdent, ctx: VisitCtx): Stmt =
-      result = self
+      result = unsafe_default(Stmt)
       # FIXME: this check is bad for `!{}`; parsed as `Ident"!{}"`
       if self[0] == Ident{"!"}:
          self.delete(0)
          result = self
       else:
-         if self.len == 1: result = ctx.add(self[0])
+         if self.len == 1:
+            result = ctx.add(self[0])
          elif self[0] == Ident{"bind"}:
-            result = ctx.add(Sym{"{}"}.call(Ident{"typedesc"}.call(Sym{"Sym"}), self[1 .. ^1].join.lit))
+            result = ctx.add(Sym{"{}"}.call(Ident{"typedesc"}.call(Sym{"Sym"}),
+                             self[1 .. ^1].join.lit))
          else:
             let expr_str = self.val.join
-            try: result = ctx.add(Expr{macros.parse_expr(expr_str)})
+            try:
+               result = ctx.add(Expr{macros.parse_expr(expr_str)})
             except ValueError:
                self.error("failed to parse AST injection expr: '" & expr_str & "'")
 
+   # is this still needed?
    proc sym_visitor(self: Sym, ctx: tuple[]): Stmt = Ident{self.val}
 
    let ctx = VisitCtx()
@@ -59,7 +64,6 @@ proc internal_quote(stmts: Stmt, gensym: bool): StmtList =
 
 macro AST*(stmts): untyped = internal_quote(Stmt{stmts}, gensym = false).detail
    ## An untyped quoting operator with some extensions.
-
    # FIXME: document extensions
 
 macro AST_gensym*(stmts): untyped = internal_quote(Stmt{stmts}, gensym = true).detail
@@ -70,5 +74,5 @@ template add_AST*(self, stmts): untyped = add(self, AST(stmts))
 
 macro `!`*(expr): untyped =
    ## An alias for `AST`, for concise expression generation.
-   let expr = Expr{expr}.skip(Paren, n = 1)
+   let expr = Expr{expr}.skip(Paren)
    result = internal_quote(expr, gensym = false).detail
