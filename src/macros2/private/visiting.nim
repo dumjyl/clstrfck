@@ -1,8 +1,8 @@
 proc visit[Visit, Ctx](
       self: IdentDef,
       ctx: Ctx,
-      fn: proc (self: Visit, ctx: Ctx): Stmt {.nim_call.}) =
-   template v(x): auto = expect(visit(Visit, x, ctx, fn), type_of(x))
+      visit_fn: proc (self: Visit, ctx: Ctx): Stmt {.nim_call.}) =
+   template v(x): auto = expect(visit(Visit, x, ctx, visit_fn), type_of(x))
    self.ident = self.ident.v
    match self.typ of Some:
       self.typ = typ.v
@@ -13,13 +13,13 @@ proc visit*[Visit: Stmt; Ctx](
       _: type[Visit],
       self: Stmt,
       ctx: Ctx,
-      fn: proc (self: Visit, ctx: Ctx): Stmt {.nim_call.}
+      visit_fn: proc (self: Visit, ctx: Ctx): Stmt {.nim_call.}
       ): Stmt =
    result = self
    match self of Visit:
-      result = fn(self, ctx)
+      result = visit_fn(self, ctx)
    else:
-      template v(x): auto = expect(visit(Visit, x, ctx, fn), type_of(x))
+      template v(x): auto = expect(visit(Visit, x, ctx, visit_fn), type_of(x))
       match self:
       of ExprContainer:
          for i in 0 ..< self.len:
@@ -57,7 +57,7 @@ proc visit*[Visit: Stmt; Ctx](
          # FIXME: patterns
          # FIXME: pragmas
          for i in 0 ..< self.formals.len:
-            visit(self.formals[i], ctx, fn)
+            visit(self.formals[i], ctx, visit_fn)
          match self.body of Some:
             self.body = body.v
       of Block:
@@ -66,5 +66,12 @@ proc visit*[Visit: Stmt; Ctx](
             self.label = label.v
          self.label = self.label.expect.v
          self.body = self.body.v
+      of Discard:
+         match self.val of Some:
+            self.val = val.v
+      of QualTypeExpr: self.val = self.val.v
+      of TupleTypeExpr:
+         for i in 0 ..< self.len:
+            visit(self[i], ctx, visit_fn)
       of SingleSym, Ident, Lit, Comment, Unexposed: discard # nothing to recurse
       else: self.error("FIXME: visit{", self.kind, "}")

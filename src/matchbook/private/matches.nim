@@ -86,6 +86,10 @@ func `{}`(Self: type[OfVariant], variant: NimNode, is_expr = false): Self =
    of nnkIdentLike: result.expr = !kinds_of(`variant`)
    else: variant.error("failed to parse `OfVariant`")
 
+proc templ(name, tmp, kinds: NimNode): NimNode =
+   result = AST:
+      template `name`: auto {.used.} = unsafe_subconv(`tmp`, `kinds`)
+
 proc process_elif_expr(
       expr: OfExpr,
       variant: OfVariant,
@@ -98,8 +102,7 @@ proc process_elif_expr(
       let `tmp` = `expr.expr`
    if expr.kind != OfExprKind.ComplexExpr:
       new_idents.add($expr.ident)
-      result.add_AST:
-         template `expr.ident`: auto {.used.} = unsafe_subconv(`tmp`, `variant.expr`)
+      result.add(templ(expr.ident, tmp, variant.expr))
    else:
       discard # expr.expr.error("FIXME: ComplexExpr")
    result.add(!(kind(`tmp`) in `variant.expr`))
@@ -155,6 +158,7 @@ proc case_match(expr: OfExpr, branches: NimNode): NimNode =
    let kind_expr = !kind(`expr.expr`)
    let expr_ident = ident($expr.ident)
    let tmp = nskLet.gen
+   let kind_type = nskType.gen
    let case_stmt = nnkCaseStmt{kind_expr}
    var else_kinds = NimNode(nil)
    for branch in branches:
@@ -176,8 +180,7 @@ proc case_match(expr: OfExpr, branches: NimNode): NimNode =
                else_kinds = if else_kinds == nil: branch[i]
                             else: !system.`!+`(`else_kinds`, `branch[i]`)
             if expr.kind != OfExprKind.ComplexExpr:
-               branch[^1].insert(0, AST do:
-                  template `expr.ident`: auto {.used.} = unsafe_subconv(`tmp`, `kinds`))
+               branch[^1].insert(0, templ(expr.ident, tmp, kinds))
             variants.todo_unpack_args
             if variants.len == 1 and variants[0].has_unpack_args:
                let call = !unpack(`expr_ident`)
@@ -186,13 +189,15 @@ proc case_match(expr: OfExpr, branches: NimNode): NimNode =
                branch[^1].insert(1, call)
       of nnkElse:
          if expr.kind != OfExprKind.ComplexExpr:
-            branch[0].insert(0, AST do:
-               template `expr.ident`: auto {.used.} = unsafe_subconv(`tmp`, `else_kinds`))
+            let kinds = !({low(`kind_type`) .. high(`kind_type`)} - `else_kinds`)
+            branch[0].insert(0, templ(expr.ident, tmp, kinds))
          case_stmt.add(branch)
       else: case_stmt.add(process_if_branch(branch))
    result = AST:
       let `tmp` = `expr.expr`
+      type `kind_type` = typeof(`kind_expr`)
       `case_stmt`
+   #dump result
 
 macro match*(self: untyped, branches: varargs[untyped]): untyped =
    ## Control flow for working with polymorhpic types.

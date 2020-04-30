@@ -39,3 +39,8 @@ test Ident:
    let y = !abc
    assert(x == y)
    assert(x == "abc")
+
+test generic_bang:
+   # requires a couple bugfixes not upstreamed to function
+   proc test[T] = discard !undeclared_ident
+   test[int]()

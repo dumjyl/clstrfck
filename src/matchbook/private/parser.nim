@@ -2,45 +2,63 @@ import
    macros2,
    macros2/checks
 
+# FIXME: error on pub for subs
+
 type
    Name* = object
-      pub*: bool
+      exported*: bool
       ident*: Ident
       pragmas*: Pragmas # FIXME: impliment
    RecordField* = object
       name*: Name
       typ*: Expr
-   RecordBody* = object
+   RecordQual* {.pure.} = enum None, Ref, Ptr
+   RecordBodyPrefix* = object
+      qual*: RecordQual
       is_abstract*: bool
+   RecordBody* = object
+      prefix*: RecordBodyPrefix
       fields*: seq[RecordField]
       subs*: seq[RecordDef]
    RecordDef* = ref object
       name*: Name
       body*: RecordBody
+      parent*: RecordDef
    OtherDef* = ref object
       name*: Name
       body*: Expr
    DefKind* {.pure.} = enum Record, Other
    Def* = object
       case kind*: DefKind:
-      of DefKind.Record: record*: RecordDef
+      of DefKind.Record: rec*: RecordDef
       of DefKind.Other: other*: OtherDef
 
-proc `{}`(Self: type[Name], expr: Expr): Self =
+iterator subs*(self: RecordDef): RecordDef =
+   ## Yield direct descendants of `self`.
+   for sub in self.body.subs:
+      yield sub
+
+iterator fields*(self: RecordDef): RecordField =
+   ## Yield the fields of `self`.
+   for field in self.body.fields:
+      yield field
+
+proc parse(expr: Expr, Self: type[Name]): Self =
+   ## Parse a typedef name.
+   result = Self(ident: !placeholder, pragmas: Pragmas{})
+   var expr = expr
    match expr.is_command_call("pub", 1) as call of Some:
-      result = Self(pub: true, ident: call.args[0].expect(Ident), pragmas: Pragmas{})
-   else:
-      result = Self(pub: false, ident: expr.expect(Ident), pragmas: Pragmas{})
+      result.exported = true
+      expr = call.args[0]
+   match expr as pragma_expr of PragmaExpr:
+      result.pragmas = pragma_expr.pragmas
+      expr = pragma_expr.expr
+   result.ident = expr.expect(Ident)
 
-proc is_record_kw(expr: Expr): bool =
+proc is_abstract(expr: Expr): Option[bool] =
+   ## `None` if `expr` is not a record keyword.
    match expr of Ident and (expr == "record" or expr == "abstract"):
-      result = true
-
-proc is_record_body(expr: Expr): bool =
-   match expr of Call and expr.args.len == 1 and expr.args[0] of StmtList:
-      match expr.name:
-      of RefTypeExpr, PtrTypeExpr: result = name.val.is_record_kw
-      else: result = name.is_record_kw
+      result = some(expr == "abstract")
 
 proc is_field_like(stmt: Stmt): Option[tuple[name: Ident, typ: Expr]] =
    match stmt of Call and stmt.name of Ident and stmt.args.len == 1 and
@@ -48,38 +66,48 @@ proc is_field_like(stmt: Stmt): Option[tuple[name: Ident, typ: Expr]] =
          stmt_list[0] as typ of Expr:
       result = some((name: name, typ: typ))
 
-proc `{}`(Self: type[RecordDef], type_def: Asgn): Self
+proc parse(expr: Expr, Self: type[RecordBodyPrefix]): Option[Self] =
+   ## Try to parse record keywords and ref like annotations.
+   match expr:
+   of RefTypeExpr, PtrTypeExpr:
+      var self = ? expr.val.parse(Self)
+      if self.qual == RecordQual.None:
+         match expr:
+         of RefTypeExpr:
+            #self.qual = RecordQual.Ref
+            expr.error("FIXME: ptr qualifiers")
+         of PtrTypeExpr: self.qual = RecordQual.Ptr
+         else: discard
+         result = self.some
+      else: result = Self.none
+   else: result = Self(is_abstract: ? expr.is_abstract).some
 
-proc `{}`(Self: type[RecordBody], expr: Expr): Self =
-   match expr.is_call(["record", "abstract"], 1) as call of Some and
-         call.args[0] as body of StmtList:
-      result = Self(is_abstract: call.name.expect(Ident) == "abstract")
+proc parse(type_def: Asgn, Self: type[RecordDef]): Option[Self] =
+   let expr = type_def.rhs
+   match expr of Call and expr.args.len == 1 and expr.args[0] as body of StmtList:
+      var rec = Self(name: type_def.lhs.parse(Name),
+                     body: RecordBody(prefix: ? expr.name.parse(RecordBodyPrefix)))
       for field_or_sub in body:
          match field_or_sub as sub of Asgn:
-            result.subs.add(RecordDef{sub})
+            rec.body.subs.add(sub.parse(RecordDef).expect("failed to parse record"))
+            rec.body.subs[^1].parent = rec
          elif field_or_sub.is_field_like as field of Some:
-            result.fields.add(RecordField(name: Name(ident: field.name), typ: field.typ))
+            rec.body.fields.add(RecordField(name: Name(ident: field.name), typ: field.typ))
          else:
             field_or_sub.error("failed to parse field")
-   elif expr.is_record_kw:
-      result = Self(is_abstract: expr.expect(Ident) == "abstract")
+      result =  rec.some
+   else: result = Self(name: type_def.lhs.parse(Name),
+                       body: RecordBody(prefix: ? expr.parse(RecordBodyPrefix))).some
+
+proc parse(type_def: Asgn, Self: type[OtherDef]): Self =
+   ## Parse an alias type
+   result = Self(name: type_def.lhs.parse(Name), body: type_def.rhs)
+
+proc parse*(type_def: Asgn, Self: type[Def]): Self =
+   match type_def.parse(RecordDef) as rec of Some:
+      result = Self(kind: DefKind.Record, rec: rec)
    else:
-      expr.error("FIXME")
+      result = Self(kind: DefKind.Other, other: type_def.parse(OtherDef))
 
-proc `{}`(Self: type[RecordDef], type_def: Asgn): Self =
-   result = Self(name: Name{type_def.lhs}, body: RecordBody{type_def.rhs})
-
-proc `{}`(Self: type[OtherDef], type_def: Asgn): Self =
-   result = Self(name: Name{type_def.lhs}, body: type_def.rhs)
-
-proc `{}`(Self: type[DefKind], type_def: Asgn): Self =
-   result = if type_def.rhs.is_record_body: Self.Record else: Self.Other
-
-proc `{}`*(Self: type[Def], type_def: Asgn): Self =
-   case DefKind{type_def}:
-   of DefKind.Record:
-      result = Self(kind: DefKind.Record, record: RecordDef{type_def})
-   of DefKind.Other:
-      result = Self(kind: DefKind.Other, other: OtherDef{type_def})
-
-proc is_simple*(self: RecordDef): bool = not self.body.is_abstract and self.body.subs.len == 0
+proc is_simple*(self: RecordDef): bool =
+   result = not self.body.prefix.is_abstract and self.body.subs.len == 0

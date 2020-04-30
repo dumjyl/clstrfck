@@ -100,9 +100,11 @@ generate Stmt:
       Conv
       Dot
       TypeExpr:
-         PtrTypeExpr
-         RefTypeExpr
-         VarTypeExpr
+         TupleTypeExpr
+         QualTypeExpr:
+            PtrTypeExpr
+            RefTypeExpr
+            VarTypeExpr
    Decl:
       RoutineDecl:
          ProcDecl
@@ -128,6 +130,11 @@ generate TypeDefBody:
    EnumTypeDefBody
    ObjectTypeDefBody
    ExprTypeDefBody
+   QualTypeDefBody:
+      RefTypeDefBody
+      PtrTypeDefBody
+      # VarTypeDefBody
+      # DistinctTypeDefBody
 
 generate MaybeColon:
    NoColon
@@ -172,10 +179,10 @@ template throw_ast(self: NimNode, msg = "") =
 
 proc canon_and_verify(self: NimNode): NimNode =
    template v(x): auto = canon_and_verify(x)
-   # FIXME: stmt list flattening
+   # FIXME: StmtList/StmtListExpr flattening
    result = self
    match self:
-   of nnkFormalParams:
+   of nnkFormalParams, nnkTupleTy:
       var ident_defs = seq[NimNode].default
       for i in 1 ..< self.len:
          for j in 0 ..< self[i].len - 2:
@@ -238,7 +245,7 @@ func `{}`*(Self: type[StmtKind], node: NimNode): Self =
       if node.len == 1 and node[0].kind != nnkExprColonExpr: Self.Paren else: Self.TupleConstr
    of nnkBracket: Self.Bracket
    of nnkRStrLit: Self.StringLitCall # own kind | StringLitCall | property on string lit.
-   of nnkCall: Self.Call
+   of nnkCall: Self.Call # FIXME: this can contain ExprColonExpr, remap to ObjectConstr
    of nnkPrefix: Self.PrefixCall
    of nnkInfix: Self.InfixCall
    of nnkCommand: Self.CommandCall
@@ -262,6 +269,7 @@ func `{}`*(Self: type[StmtKind], node: NimNode): Self =
    of nnkCurlyExpr: Self.CurlyCall
    of nnkBracketExpr: Self.BracketCall
    of nnkPragmaExpr: Self.PragmaExpr
+   of nnkTupleTy: Self.TupleTypeExpr
    of nnkRefTy: Self.RefTypeExpr
    of nnkPtrTy: Self.PtrTypeExpr
    of nnkVarTy: Self.VarTypeExpr
@@ -320,7 +328,7 @@ func `{}`*(Self: type[StmtKind], node: NimNode): Self =
          nnkUsingStmt, # UsingDefs
 
          nnkTypeOfExpr, nnkObjectTy,
-         nnkTupleTy, nnkTupleClassTy, nnkTypeClassTy, nnkStaticTy,
+         nnkTupleClassTy, nnkTypeClassTy, nnkStaticTy,
          nnkRecList, nnkRecCase, nnkRecWhen, nnkDistinctTy,
          nnkProcTy, nnkIteratorTy, nnkEnumTy,
          nnkEnumFieldDef, nnkArgList, nnkPattern,
@@ -559,9 +567,15 @@ proc `{}`*(Self: type[IdentDef], ident_def: NimNode): IdentDef =
 proc `{}`*(Self: type[IdentDef], name: AnyIdent, typ = Expr.none, val = Expr.none): Self =
    result = Self(detail: nnkIdentDefs{name.detail, empty_opt(typ), empty_opt(val)})
 
+proc `{}`*(Self: type[IdentDef], name: AnyIdent, typ: Expr, val = Expr.none): Self =
+   result = Self{name, some(typ), val}
+
 # --- FormalParams
 
 impl_container FormalParams, IdentDef, 1
+
+proc add*(self: FormalParams, ident_def: IdentDef) =
+   self.detail.add(ident_def.detail)
 
 # --- GenericParams
 
@@ -707,7 +721,7 @@ proc `{}`*(
       body = StmtList{}.Stmt.some,
       pragmas: openarray[Expr] = [],
       ): Self =
-   ## Initializer for routine decls.
+   ## Constructor for routine decls.
    let params = nnkFormalParams{}
    match return_type of Some: params.add(return_type.detail)
    else: params.add(nnkEmpty{})
@@ -723,14 +737,26 @@ proc `{}`*(
    let body = block:
       match body of Some: body.detail
       else: nnkEmpty{}
-   result = Self{NimNodeKind{Self}{
+   result = Self{NimNodeKind{Self}{[
       ident.detail,
       nnkEmpty{}, # FIXME: patterns
       nnkEmpty{}, # FIXME: generic params
       params,
       pragmas,
       nnkEmpty{}, # reserved
-      body}}
+      body]}}
+
+proc `{}`*(
+      Self: type[meta(RoutineDecl, Record)],
+      ident: AnyIdent,
+      formals: openarray[IdentDef],
+      return_type: Expr,
+      body: Stmt = StmtList{},
+      pragmas: openarray[Expr] = [],
+      exported = false,
+      ): Self =
+   result = Self{ident, formals, return_type.some, body.some, pragmas}
+   result.exported = exported
 
 # --- Arguments
 
@@ -740,7 +766,7 @@ proc args*(self: AnyCall): Arguments = Arguments(detail: self.detail)
 
 # --- AnyCall
 
-impl_field AnyCall, name, Expr, 0
+impl_field AnyCall, name, Expr
 
 template unpack*(self: AnyCall, name_name: untyped, args_name: untyped) =
    template name_name: Expr {.used.} = self.name
@@ -766,9 +792,13 @@ proc call*(self: RoutineDecl, args: varargs[Expr]): Call = Call{self.ident, args
 
 # FIXME: careful, adding to a Paren can mutate it into an anonymous tuple constructor.
 
-# --- TypeExpr
+# --- TupleTypeExpr
 
-impl_field TypeExpr, val, Expr, 0
+impl_container TupleTypeExpr, IdentDef
+
+# --- QualTypeExpr
+
+impl_field QualTypeExpr, val, Expr
 
 # --- MaybeColon
 
@@ -827,6 +857,11 @@ proc val*(self: Paren): Expr = Expr{self.detail[0]}
 
 impl_container ExprContainer, Expr
 
+# --- RecordConstr
+
+proc add*(self: RecordConstr, name: AnyIdent, expr: Expr) =
+   self.detail.add(nnkExprColonExpr{[name.detail, expr.detail]})
+
 # --- ObjectConstr
 
 # FIXME: name can be an option too for typechecked nodes or something, idk...
@@ -838,6 +873,9 @@ func `name=`*(self: ObjectConstr, expr: Expr) = self.detail[0] = expr.detail
 template unpack*(self: ObjectConstr, name_name: untyped, fields_name: untyped) =
    template name_name: Expr {.used.} = self.name
    template `name_name=`(val: Expr) {.used.} = self.name = val
+
+proc `{}`*(Self: type[ObjectConstr], name: Expr): Self =
+   result = Self{nnkObjConstr{[name.detail]}}
 
 # --- Pragmas
 
@@ -936,7 +974,8 @@ template `{}`(Self: type[NimNodeKind], T: type[meta(AnyVarDefs, Record)]): Self 
 
 func `{}`*(Self: type[meta(AnyVarDefs, Record)], name: AnyIdent, val: Expr): Self =
    result = Self(detail: NimNodeKind{Self}{})
-   # FIXME(nim): when this is a match statement weird case coverage errors, the code doesn't make sense but the error message was nonsense.
+   # FIXME(nim): when this is a match statement weird case coverage errors,
+   #             the code doesn't make sense but the error message was nonsense.
    when result is VarDefs or result is LetDefs:
       result.detail.add(IdentDef{name, val = val.some}.detail)
    elif result is ConstDefs:
@@ -959,15 +998,32 @@ proc `{}`*(Self: type[TypeDefs], type_defs: varargs[TypeDef]): Self =
 
 # --- TypeDef
 
-proc `{}`(Self: type[TypeDef], name: AnyIdent, pub: bool, pragmas: Pragmas, node: NimNode): Self =
+proc `{}`(
+      Self: type[TypeDef],
+      name: AnyIdent,
+      exported: bool,
+      pragmas: Pragmas,
+      node: NimNode
+      ): Self =
    var name = name.detail
    # FIXME: why are brackets needed here?
-   if pub: name = nnkPostfix{[Ident{"*"}.detail, name]}
-   if pragmas.len != 0: name = nnkPragmaExpr{[name, pragmas.detail]} # FIXME: this could cause unexpected behavior if the user adds to the pragma node later.
+   if exported: name = nnkPostfix{[Ident{"*"}.detail, name]}
+   # FIXME: this could cause unexpected behavior if the user adds to the pragma node later.
+   #        or weird invalid rendering if we don't do this.
+   if pragmas.len != 0: name = nnkPragmaExpr{[name, pragmas.detail]}
    result = Self(detail: nnkTypeDef{[name, nnkEmpty{}, node]})
 
-proc `{}`*(Self: type[TypeDef], name: AnyIdent, pub: bool, expr: Expr): Self =
-   result = Self{name, pub, Pragmas{}, expr.detail}
+proc `{}`*(
+      Self: type[TypeDef],
+      name: AnyIdent,
+      exported: bool,
+      pragmas: Pragmas,
+      expr: Expr
+      ): Self =
+   result = Self{name, exported, pragmas, expr}
+
+proc `{}`*(Self: type[TypeDef], name: AnyIdent, exported: bool, expr: Expr): Self =
+   result = Self{name, exported, Pragmas{}, expr.detail}
 
 proc `{}`*(Self: type[TypeDef], name: AnyIdent, expr: Expr): Self =
    result = Self{name, false, Pragmas{}, expr.detail}
@@ -975,17 +1031,17 @@ proc `{}`*(Self: type[TypeDef], name: AnyIdent, expr: Expr): Self =
 proc `{}`*(
       Self: type[TypeDef],
       name: AnyIdent,
-      pub: bool,
+      exported: bool,
       pragmas: Pragmas,
       body: TypeDefBody
       ): Self =
-   result = Self{name, pub, pragmas, body.detail}
+   result = Self{name, exported, pragmas, body.detail}
 
 proc `{}`*(Self: type[TypeDef], name: AnyIdent, pragmas: Pragmas, body: TypeDefBody): Self =
    result = Self{name, false, pragmas, body.detail}
 
-proc `{}`*(Self: type[TypeDef], name: AnyIdent, pub: bool, body: TypeDefBody): Self =
-   result = Self{name, pub, Pragmas{}, body.detail}
+proc `{}`*(Self: type[TypeDef], name: AnyIdent, exported: bool, body: TypeDefBody): Self =
+   result = Self{name, exported, Pragmas{}, body.detail}
 
 proc `{}`*(Self: type[TypeDef], name: AnyIdent, body: TypeDefBody): Self =
    result = Self{name, false, Pragmas{}, body.detail}
@@ -1023,7 +1079,14 @@ template unpack*(self: Asgn, lhs_name, rhs_name) =
 
 # --- Discard
 
-func `{}`*(Self: type[Discard]): Self = Self{nnkDiscardStmt{nnkEmpty{}}}
+proc `{}`*(Self: type[Discard]): Self = Self{nnkDiscardStmt{nnkEmpty{}}}
+
+proc val*(self: Discard): Option[Expr] =
+   if not(self.detail[0] of nnkEmpty):
+      result = Expr{self.detail[0]}.some
+
+proc `val=`*(self: Discard, expr: Expr) =
+   self.detail[0] = expr.detail
 
 # --- Comment
 
@@ -1086,35 +1149,45 @@ impl_items ForLoopVars
 
 # --- EnumTypeDefBody
 
-proc `{}`*(Self: type[EnumTypeDefBody]): Self = Self(detail: nnkEnumTy{[nnkEmpty{}]})
+proc `{}`*(Self: type[EnumTDB]): Self = Self(detail: nnkEnumTy{[nnkEmpty{}]})
 
-proc len*(self: EnumTypeDefBody): int = self.detail.len - 1
+proc len*(self: EnumTDB): int = self.detail.len - 1
 
-proc add*(self: EnumTypeDefBody, name: AnyIdent) = self.detail.add(name.detail)
+proc add*(self: EnumTDB, name: AnyIdent) = self.detail.add(name.detail)
 
 # --- ObjectTypeDefBody
 
-proc `{}`*(Self: type[ObjectTypeDefBody], inherits = AnyIdent.none): Self =
+proc `{}`*(Self: type[ObjectTDB], inherits = AnyIdent.none): Self =
    let inherits = block:
       match inherits of Some: nnkOfInherit{[inherits.detail]}
       else: nnkEmpty{}
    result = Self(detail: nnkObjectTy{[nnkEmpty{}, inherits, nnkRecList{}]})
 
-proc `{}`*(Self: type[ObjectTypeDefBody], inherits: AnyIdent): Self =
+proc `{}`*(Self: type[ObjectTDB], inherits: AnyIdent): Self =
    result = Self{inherits.some}
 
-proc add*(self: ObjectTypeDefBody, field: FieldDef) =
+proc add*(self: ObjectTDB, field: FieldDef) =
    self.detail[object_def_fields_pos].add(field.detail)
 
-proc add*(self: ObjectTypeDefBody, fields: openarray[FieldDef]) =
+proc add*(self: ObjectTDB, fields: openarray[FieldDef]) =
    for field in fields:
       self.add(field)
 
+# --- RefTypeDefBody
+
+proc `{}`*(Self: type[RefTDB], tdb: TDB): Self =
+   result = Self(detail: nnkRefTy{[tdb.detail]})
+
+# --- PtrTypeDefBody
+
+proc `{}`*(Self: type[PtrTDB], tdb: TDB): Self =
+   result = Self(detail: nnkPtrTy{[tdb.detail]})
+
 # --- FieldDef
 
-proc `{}`*(Self: type[FieldDef], name: AnyIdent, pub: bool, typ: Expr): Self =
+proc `{}`*(Self: type[FieldDef], name: AnyIdent, exported: bool, typ: Expr): Self =
    var name = name.detail
-   if pub: name = nnkPostfix{[core.ident("*"), name]}
+   if exported: name = nnkPostfix{[core.ident("*"), name]}
    result = FieldDef(detail: nnkIdentDefs{[name, typ.detail, nnkEmpty{}]})
 
 proc `{}`*(Self: type[FieldDef], name: AnyIdent, typ: Expr): Self = Self{name, false, typ}

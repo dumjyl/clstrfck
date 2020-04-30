@@ -1,7 +1,8 @@
 import
    mainframe,
    lca_data,
-   core
+   core,
+   std/strutils
 
 type
    MetaKind* {.pure.} = enum
@@ -49,8 +50,11 @@ func add_inheritance_tree(types: NimNode, ir: IR, inherits: NimNode) =
                detail: NimNode
       else:
          AST:
-            type `ir.name.pub_ident` = object of `inherits`
-   types.add(type_sec[0])
+            type `name` = object of `inherits`
+   for typ in type_sec:
+      types.add(typ)
+   if ir.name.ends_with("TypeDefBody"):
+      types.add(nnkTypeDef{ir.name.replace("TypeDefBody", "TDB").pub_ident, nnkEmpty{}, ir.name})
    for sub_ir in ir:
       types.add_inheritance_tree(sub_ir, ir.name.ident)
 
@@ -114,12 +118,12 @@ proc gen_meta(ir: IR, base_ir: IR): NimNode =
          result = AST: {.fatal: "empty meta typeclass: " & $Self & "; " & $kind .}
    let all = typeclass(ir.kinds[All])
    let sub = typeclass(ir.kinds[Sub])
-   let record = typeclass(ir.kinds[Record])
+   let rec = typeclass(ir.kinds[Record])
    result = AST:
       template meta*(Self: type[`ir.name.ident`], kind: static[MetaKind]): auto =
          when kind == All: `all`
          elif kind == Sub: `sub`
-         elif kind == Record: `record`
+         elif kind == Record: `rec`
          else: {.fatal: "unrecognized kind: " & $kind.}
 
 proc gen_kind(ir: IR, base_ir: IR): NimNode =
@@ -157,7 +161,6 @@ macro generate*(base, derived) =
    result.add_AST:
       proc `!of`*(self: meta(`ir.name.ident`, All), T: type[meta(`ir.name.ident`, All)]): bool =
          self.kind in kinds_of(T)
-   #if base.eq_ident("Stmt"): dump result
 
 template impl_expect*(x, y) {.dirty.} =
    proc expect*[X: x; Y: y](self: X, _: type[Y]): Y =
@@ -174,26 +177,43 @@ template impl_expect*(x, y) {.dirty.} =
       {.pop.}
       {.pop.}
 
-template impl_field*(T, f, FT, i) {.dirty.} =
+template idx(x, offset): int =
+   when x is BackwardsIndex: self.len - int(x) else: x
+
+template check_bounds*(i, len: int) =
+   if i < 0 or i > len:
+      raise new_Exception(IndexDefect, format_error_index_bound(i, len))
+
+template impl_field*(T, f, FT; i: untyped = 0) {.dirty.} =
    proc f*(self: T): FT = FT{self.detail[i]}
    proc `f=`*(self: T, val: FT) = self.detail[i] = val.detail
 
-template impl_items*(T) {.dirty.} =
-   iterator items*(self: T): auto =
-      for i in 0 ..< self.len:
-         yield self[i]
+macro impl_items*(T) =
+   AST:
+      iterator items*(self: `T`): auto =
+         for i in 0 ..< self.len:
+            yield self[i]
 
-template impl_slice_index*(T, Val) {.dirty.} =
-   proc `[]`*(self: T, i: HSlice): seq[Val] =
-      template idx(x): int =
-         when x is BackwardsIndex: self.len - int(x) else: int(x)
-      for i in idx(i.a) .. idx(i.b):
-         result.add(self[i])
+macro impl_slice_index*(T, Val, offset) =
+   AST:
+      proc `![]`*(self: `T`, i: HSlice): seq[`Val`] =
+         let a = `bind idx`(i.a, `offset`)
+         let b = `bind idx`(i.b, `offset`)
+         `bind check_bounds`(a, self.len)
+         `bind check_bounds`(b, self.len)
+         for i in a .. b:
+            result.add(self[i])
 
 macro impl_container*(Self, Val: untyped, offset: untyped = 0) =
-   result = AST:
+   AST:
       func len*(self: `Self`): int = self.detail.len - `offset`
-      proc `![]`*(self: `Self`, i: Index): `Val` = `Val`{self.detail[i + `offset`]}
-      proc `![]=`*(self: `Self`, i: Index, val: `Val`) = self.detail[i + `offset`] = val.detail
+      proc `![]`*(self: `Self`, i: Index): `Val` =
+         let i = `bind idx`(i, `offset`)
+         check_bounds(i, self.len)
+         result = `Val`{self.detail[i + `offset`]}
+      proc `![]=`*(self: `Self`, i: Index, val: `Val`) =
+         let i = `bind idx`(i, `offset`)
+         check_bounds(i, self.len)
+         self.detail[i + `offset`] = val.detail
       impl_items(`Self`)
-      impl_slice_index(`Self`, `Val`)
+      impl_slice_index(`Self`, `Val`, `offset`)

@@ -122,7 +122,7 @@ proc dbg_repr*(self: Stmt): string =
             << "name".dbg_eq(self.name.dbg_repr)
          for field in self:
             << field.dbg_repr
-   of TypeExpr:
+   of QualTypeExpr:
       list:
          << self.val.dbg_repr
    of AnyVarDefs:

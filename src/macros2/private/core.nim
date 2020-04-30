@@ -173,13 +173,13 @@ func is_prefix*(n: NimNode, name: string): bool =
 proc replace*[T](
       self: NimNode,
       ctx: T,
-      fn: proc (self: NimNode, ctx: T): NimNode {.nim_call.}
+      replace_fn: proc (self: NimNode, ctx: T): NimNode {.nim_call.}
       ): NimNode =
-   result = fn(self, ctx)
+   result = replace_fn(self, ctx)
    if result == nil:
       result = self
       for i in 0 ..< self.len:
-         self[i] = replace(self[i], ctx, fn)
+         self[i] = replace(self[i], ctx, replace_fn)
 
 proc bind_ident*(val: static[string]): NimNode {.compile_time.} =
    # FIXME: any way to fix the shit lineinfo?
@@ -191,11 +191,14 @@ proc compound_ident(n: NimNode, sub_i = 0): string =
       result.add($n[i])
 
 proc internal_quote(stmts: NimNode, dirty: bool): NimNode =
-   func mangle(s: string): NimNode = ident(s & "_c8bd72kl260gofgbf0wnsa8i0")
-
    type ReplaceCtx = ref object
       args: seq[NimNode]
       params: seq[NimNode]
+
+   proc add(self: ReplaceCtx, expr: NimNode): NimNode =
+      self.args.add(expr)
+      self.params.add(ident(nskVar.gen.`$` & "_c8bd78kl46hqm9wpf0wnso8n0"))
+      result = self.params[^1]
 
    func replace_fn(self: NimNode, ctx: ReplaceCtx): NimNode =
       if self of nnkAccQuoted:
@@ -210,16 +213,10 @@ proc internal_quote(stmts: NimNode, dirty: bool): NimNode =
                result = self[0]
          else:
             if self.len == 1:
-               result = self[0].str_val.mangle
-               if self[0] notin ctx.args:
-                  ctx.args.add(self[0])
-                  ctx.params.add(result)
+               result = ctx.add(self[0])
             elif self[0].eq_ident"bind":
-               let id = self.compound_ident(1)
-               result = id.mangle
-               if result notin ctx.args:
-                  ctx.args.add(macros.new_call("bind_ident".bind_ident, id.lit))
-                  ctx.params.add(result)
+               result = ctx.add(macros.new_call("bind_ident".bind_ident,
+                                                self.compound_ident(1).lit))
             else:
                let expr_str = self.compound_ident
                var expr = NimNode(nil)
@@ -227,10 +224,7 @@ proc internal_quote(stmts: NimNode, dirty: bool): NimNode =
                   expr = macros.parse_expr(expr_str)
                except ValueError:
                   self.error("failed to parse 'AST' expr")
-               result = expr_str.mangle
-               if result notin ctx.params:
-                  ctx.args.add(expr)
-                  ctx.params.add(result)
+               result = ctx.add(expr)
 
    let ctx = ReplaceCtx()
    let stmts = replace(stmts, ctx, replace_fn)

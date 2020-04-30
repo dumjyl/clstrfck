@@ -4,7 +4,7 @@ func into_ast*(self: Stmt): NimNode = self.detail
 proc classify_quote_type(self: Stmt): Expr =
    # handle any possible mutation after quoting here, currently conservative.
    match self:
-   of ...[StmtList, AnyCall, Ident]: Ident{$type_of(self)}
+   of ...[StmtList, AnyCall, Ident, Dot]: Ident{$type_of(self)}
    else: Ident{"Stmt"}
 
 proc internal_quote(stmts: Stmt, gensym: bool): StmtList =

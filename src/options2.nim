@@ -5,7 +5,7 @@ from sugar import `=>`
 export matches, `=>`
 
 # FIXME: consider alternatives: a wrapopt module like std/wrapnil
-#                               a more a more specialized option type generator that maintains invariants.
+#                               a more specialized option type generator that maintains invariants.
 
 {.push warnings: off.}
 
@@ -80,29 +80,29 @@ proc `$`*[T](self: Option[T]): string =
 template `$`*[T](self: Some[T] | None[T]): string = $unsafe_object_cast(self, Option[T])
 
 proc expect*[T](self: var Option[T]): var T =
-   match self of Some: result = self
-   else: fatal("tried to unpack a 'None' variant")
+   if self of None: fatal("tried to unpack a 'None' variant")
+   result = self.val
 
 proc expect*[T](self: var Option[T], msg: string): var T =
-   match self of Some: result = self
-   else: fatal("tried to unpack a 'None' variant; ", msg)
+   match self of None: fatal("tried to unpack a 'None' variant; ", msg)
+   result = self
 
 proc expect*[T](self: Option[T]): T =
-   match self of Some: result = self
-   else:
-      fatal("tried to unpack a 'None' variant")
-      result = unsafe_default(T)
+   match self of None: fatal("tried to unpack a 'None' variant")
+   result = self.val
 
 proc expect*[T](self: Option[T], msg: string): T =
-   match self of Some: result = self
-   else:
-      fatal("tried to unpack a 'None' variant; ", msg)
-      result = unsafe_default(T)
+   match self of None: fatal("tried to unpack a 'None' variant; ", msg)
+   result = self.val
 
-proc map*[X, Y](self: Option[X], fn: proc (val: X): Y): Option[Y] =
-   match self of Some: result = some(fn(self))
+proc map*[X, Y](self: Option[X], map_fn: proc (val: X): Y): Option[Y] =
+   match self of Some: result = some(map_fn(self))
    else: result = none(Y)
 
 proc or_val*[T](self: Option[T], val: T): T =
    match self of Some: result = self
    else: result = val
+
+template `?`*[T](self: Option[T]): T =
+   if self of None: return
+   self.val
